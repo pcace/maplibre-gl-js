@@ -133,6 +133,13 @@ export class LineBucket implements Bucket {
     widthsMode: boolean;
     // The resolved widths array for the feature currently being added (may be empty).
     lineWidths: number[] | null;
+    // Per-vertex width FACTORS (`line-width-factors`). When active, the per-vertex
+    // buffer holds a multiplier of the zoom-composited `line-width` at each vertex,
+    // taking precedence over `line-widths`. A feature without a factor value renders
+    // with the neutral factor 1 (i.e. exactly `line-width`).
+    factorsMode: boolean;
+    // The resolved factors array for the feature currently being added (may be null).
+    lineFactors: number[] | null;
     // The evaluated `line-width` of the current feature, used as fallback when the
     // widths array is empty.
     currentLineWidth: number;
@@ -171,33 +178,44 @@ export class LineBucket implements Bucket {
         this.taperEnabled = false;
         this.widthsMode = false;
         this.lineWidths = null;
+        this.factorsMode = false;
+        this.lineFactors = null;
         this.currentLineWidth = 0;
         this.lineKnots = null;
         this.maxVertexWidth = 0;
         this.taperDistance = 0;
         this.lineLength = 0;
         this.indexArray = new TriangleIndexArray();
-        // Arrays cannot be packed into vertex attributes, so `line-widths` is evaluated
-        // per feature right here in the bucket and excluded from the paint binder.
+        // Arrays cannot be packed into vertex attributes, so `line-widths` and
+        // `line-width-factors` are evaluated per feature right here in the bucket and
+        // excluded from the paint binder.
         this.programConfigurations = new ProgramConfigurationSet(options.layers, options.zoom,
-            (property) => property !== 'line-widths');
+            (property) => property !== 'line-widths' && property !== 'line-width-factors');
         this.segments = new SegmentVector();
         this.maxLineLength = 0;
 
         this.stateDependentLayerIds = this.layers.filter((l) => l.isStateDependent()).map((l) => l.id);
 
-        // Per-vertex widths take precedence over the two-sided taper. A property is
-        // active when it is data-driven (cannot be known to be empty/-1 for every
-        // feature) or when its constant value differs from the default. When active,
-        // each vertex stores its position along the line (0..1) in the taper buffer and
-        // the shader interpolates the width between `line-width-start`/`line-width-end`
-        // or reads the absolute per-vertex width directly.
-        this.widthsMode = this.layers.some((layer) => {
+        // Per-vertex widths take precedence over the two-sided taper, and per-vertex
+        // width factors take precedence over the absolute per-vertex widths. A
+        // property is active when it is data-driven (cannot be known to be empty/-1
+        // for every feature) or when its constant value differs from the default.
+        // When active, each vertex stores its position along the line (0..1) in the
+        // taper buffer and the shader interpolates the width between
+        // `line-width-start`/`line-width-end`, reads the absolute per-vertex width
+        // directly, or multiplies the zoom-composited `line-width` by the per-vertex
+        // factor.
+        this.factorsMode = this.layers.some((layer) => {
+            const factors = layer.paint.get('line-width-factors');
+            const constant = factors.constantOr(null);
+            return !factors.isConstant() || (Array.isArray(constant) && constant.length > 0);
+        });
+        this.widthsMode = !this.factorsMode && this.layers.some((layer) => {
             const widths = layer.paint.get('line-widths');
             const constant = widths.constantOr(null);
             return !widths.isConstant() || (Array.isArray(constant) && constant.length > 0);
         });
-        this.taperEnabled = this.widthsMode || this.layers.some((layer) => {
+        this.taperEnabled = this.factorsMode || this.widthsMode || this.layers.some((layer) => {
             const widthStart = layer.paint.get('line-width-start');
             const widthEnd = layer.paint.get('line-width-end');
             return widthStart.constantOr(-1) >= 0 || widthEnd.constantOr(-1) >= 0 ||
@@ -330,8 +348,25 @@ export class LineBucket implements Bucket {
         this.lineClips = this.lineFeatureClips(feature);
 
         // Per-vertex widths: evaluate the data-driven array for this feature. An empty
-        // or missing array falls back to `line-width`.
-        if (this.widthsMode) {
+        // or missing array falls back to `line-width`. In factor mode the base
+        // `line-width` also needs to be evaluated for the conservative query
+        // pre-filter (`line-width` · max factor).
+        if (this.factorsMode) {
+            const factors = this.layers[0].paint.get('line-width-factors').evaluate(feature, {});
+            this.lineFactors = Array.isArray(factors) && factors.length > 0 ? factors.map(Number) : null;
+            this.currentLineWidth = this.layers[0].paint.get('line-width').evaluate(feature, {});
+            if (this.lineFactors) {
+                let maxFactor = 0;
+                for (const f of this.lineFactors) {
+                    if (f > maxFactor) maxFactor = f;
+                }
+                if (this.currentLineWidth * maxFactor > this.maxVertexWidth) {
+                    this.maxVertexWidth = this.currentLineWidth * maxFactor;
+                }
+            } else if (this.currentLineWidth > this.maxVertexWidth) {
+                this.maxVertexWidth = this.currentLineWidth;
+            }
+        } else if (this.widthsMode) {
             const widths = this.layers[0].paint.get('line-widths').evaluate(feature, {});
             this.lineWidths = Array.isArray(widths) && widths.length > 0 ? widths.map(Number) : null;
             this.currentLineWidth = this.layers[0].paint.get('line-width').evaluate(feature, {});
@@ -397,12 +432,12 @@ export class LineBucket implements Bucket {
             }
             this.lineLength = length;
 
-            // Per-vertex widths: record the normalized cumulative distance of every
-            // vertex so a width given at a vertex is reproduced exactly there, and
-            // anything in between (e.g. globe subdivision) interpolates along the
+            // Per-vertex widths/factors: record the normalized cumulative distance of
+            // every vertex so a value given at a vertex is reproduced exactly there,
+            // and anything in between (e.g. globe subdivision) interpolates along the
             // actual geometry. Falls back to evenly spaced stops if the array length
             // does not match the vertex count.
-            if (this.widthsMode) {
+            if (this.factorsMode || this.widthsMode) {
                 this.lineKnots = new Array(len - first);
                 this.lineKnots[0] = 0;
                 let cum = 0;
@@ -674,7 +709,14 @@ export class LineBucket implements Bucket {
         if (this.taperEnabled) {
             const factor = this.lineLength > 0 ? Math.min(this.taperDistance / this.lineLength, 1) : 0;
             let value;
-            if (this.widthsMode) {
+            if (this.factorsMode) {
+                const factors = this.lineFactors;
+                // Neutral factor 1 for features without a factor value → exactly
+                // `line-width` (e.g. plain tracks sharing the tapered line layer).
+                value = (factors && factors.length > 0 && this.lineKnots) ?
+                    interpolateWidthProfile(factors, this.lineKnots, factor) :
+                    1;
+            } else if (this.widthsMode) {
                 const widths = this.lineWidths;
                 value = (widths && widths.length > 0 && this.lineKnots) ?
                     interpolateWidthProfile(widths, this.lineKnots, factor) :

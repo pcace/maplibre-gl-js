@@ -114,10 +114,12 @@ export class LineStyleLayer extends StyleLayer {
         const lineWidthEnd = this.paint.get('line-width-end').evaluate(feature, featureState);
         const lineGapWidth = this.paint.get('line-gap-width').evaluate(feature, featureState);
         const lineWidths = this.paint.get('line-widths').evaluate(feature, featureState);
+        const lineWidthFactors = this.paint.get('line-width-factors').evaluate(feature, featureState);
         const hasVertexWidths = Array.isArray(lineWidths) && lineWidths.length > 0;
+        const hasVertexFactors = Array.isArray(lineWidthFactors) && lineWidthFactors.length > 0;
 
         // No per-feature width variation: use the original constant-width path.
-        if (!hasVertexWidths && lineWidthStart < 0 && lineWidthEnd < 0) {
+        if (!hasVertexFactors && !hasVertexWidths && lineWidthStart < 0 && lineWidthEnd < 0) {
             return polygonIntersectsBufferedMultiLine(translatedPolygon, geometry,
                 pixelsToTileUnits / 2 * getLineWidth(lineWidth, lineGapWidth));
         }
@@ -129,7 +131,13 @@ export class LineStyleLayer extends StyleLayer {
         // that is actually drawn is clickable.
         const toHalfWidth = (w: number) => pixelsToTileUnits / 2 * getLineWidth(w, lineGapWidth);
         let localHalfWidth: (t: number, line?: Point[]) => number;
-        if (hasVertexWidths) {
+        if (hasVertexFactors) {
+            const factors = lineWidthFactors.map(Number);
+            localHalfWidth = (t, line) => toHalfWidth(lineWidth * (
+                line?.length === factors.length ?
+                    interpolateWidthProfile(factors, lineKnots(line), t) :
+                    interpolateWidthProfile(factors, [], t)));
+        } else if (hasVertexWidths) {
             const widths = lineWidths.map(Number);
             localHalfWidth = (t, line) => toHalfWidth(
                 line?.length === widths.length ?

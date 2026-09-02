@@ -96,6 +96,11 @@ void main() {
     // The per-vertex buffer already holds the absolute width at this vertex
     // (`line-widths`), so it is used directly.
     width = a_taper;
+#elif defined(VARIABLE_WIDTH_FACTOR)
+    // The per-vertex buffer holds a multiplier of the zoom-composited `line-width`
+    // (`line-width-factors`), so the base width keeps its regular paint semantics
+    // (including zoom interpolation) and just gets scaled per vertex.
+    width = width * a_taper;
 #else
 
     // The start/end widths are per-feature values (uniform or attribute, supplied by

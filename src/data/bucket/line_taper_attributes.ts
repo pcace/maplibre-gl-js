@@ -3,11 +3,12 @@ import {createLayout, type StructArrayLayout, type StructArrayMember} from '../.
 /*
  * Per-vertex line taper attribute.
 
- * `a_taper` stores the normalized position of a vertex along its line
- * (0.0 = line start, 1.0 = line end). The line vertex shader uses it to
- * interpolate the line width between `line-width-start` and `line-width-end`:
-
- *     width = mix(widthStart, widthEnd, a_taper)
+ * `a_taper` stores, depending on the active taper mode:
+ *   - the normalized position of a vertex along its line (0.0 = line start,
+ *     1.0 = line end) for `line-width-start`/`line-width-end`:
+ *         width = mix(widthStart, widthEnd, a_taper)
+ *   - the absolute width at the vertex for `line-widths`
+ *   - a multiplier of `line-width` at the vertex for `line-width-factors`
 
  * The attribute lives in its own vertex buffer which is only created and bound
  * when a line style layer uses one of the taper properties, so regular lines

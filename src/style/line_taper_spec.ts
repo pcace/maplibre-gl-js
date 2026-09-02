@@ -15,6 +15,13 @@ import type {StylePropertySpecification} from '@maplibre/maplibre-gl-style-spec'
  * per vertex of the line, which the bucket writes directly into the per-vertex
  * buffer. It takes precedence over `line-width-start`/`line-width-end`. The
  * default of `[]` means "not set".
+ *
+ * `line-width-factors` implements per-vertex width FACTORS: a data-driven array of
+ * multipliers (one per vertex of the line), each applied to the (zoom-composited)
+ * `line-width` value. Unlike `line-widths` the base width keeps its normal paint
+ * semantics (including zoom interpolation), so zoom-live tapered lines are possible
+ * without rebuilding geometry. It takes precedence over `line-widths`. The default
+ * of `[]` means "not set"; a feature without a value renders at `line-width`.
  */
 export const lineTaperPaintSpecs: {[name: string]: StylePropertySpecification} = {
     'line-width-start': {
@@ -32,6 +39,14 @@ export const lineTaperPaintSpecs: {[name: string]: StylePropertySpecification} =
         expression: {interpolated: true, parameters: ['zoom', 'feature']}
     },
     'line-widths': {
+        type: 'array',
+        value: 'number',
+        default: [],
+        transition: false,
+        'property-type': 'data-driven',
+        expression: {interpolated: false, parameters: ['zoom', 'feature']}
+    },
+    'line-width-factors': {
         type: 'array',
         value: 'number',
         default: [],
