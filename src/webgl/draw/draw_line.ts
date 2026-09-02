@@ -181,16 +181,20 @@ function drawLineTiles(
     const crossfade = layer.getCrossfadeParameters();
 
     // Tapered lines: active when `line-width-start` and/or `line-width-end` are set
-    // (the property default is -1 = "not set"). The shader is compiled with
-    // `#define TAPER` and reads the two widths plus the per-vertex `a_taper` factor
-    // from the bucket's taper buffer. The widths are per-feature values bound by the
-    // paint binder (uniform for constants, attribute for data-driven expressions);
-    // an unset side falls back to `line-width` in the shader.
+    // (the property default is -1 = "not set"), or when per-vertex `line-widths` are
+    // used (which take precedence). The shader is compiled with a defines macro and
+    // reads the per-vertex `a_taper` factor from the bucket's taper buffer. With
+    // `line-widths` that buffer already holds the absolute width per vertex.
     const lineWidthStart = layer.paint.get('line-width-start');
     const lineWidthEnd = layer.paint.get('line-width-end');
+    const lineWidths = layer.paint.get('line-widths');
     const taper = lineWidthStart.constantOr(-1) >= 0 || lineWidthEnd.constantOr(-1) >= 0 ||
         !lineWidthStart.isConstant() || !lineWidthEnd.isConstant();
-    const defines = taper ? ['#define TAPER;'] : [];
+    const variableWidth = !lineWidths.isConstant() || ((lineWidths.constantOr(null))?.length ?? 0) > 0;
+    // `TAPER` enables the per-vertex width machinery in the shader; `VARIABLE_WIDTH`
+    // (only meaningful together with TAPER) switches it from the start/end mix to a
+    // direct per-vertex width.
+    const defines = variableWidth ? ['#define TAPER;', '#define VARIABLE_WIDTH;'] : taper ? ['#define TAPER;'] : [];
 
     let programId: string;
     if (image) programId = 'linePattern';
@@ -265,7 +269,7 @@ function drawLineTiles(
             stencil, colorMode, CullFaceMode.disabled, uniformValues, terrainData, projectionData,
             layer.id, bucket.layoutVertexBuffer, bucket.indexBuffer, bucket.segments,
             layer.paint, painter.transform.zoom, programConfiguration, bucket.layoutVertexBuffer2,
-            undefined, taper ? bucket.layoutTaperBuffer : undefined);
+            undefined, defines.length > 0 ? bucket.layoutTaperBuffer : undefined);
 
         firstTile = false;
         // once refactored so that bound texture state is managed, we'll also be able to remove this firstTile/programChanged logic

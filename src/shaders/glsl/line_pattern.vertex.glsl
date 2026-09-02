@@ -13,8 +13,11 @@
 layout(location = 0) in ivec2 a_pos_normal;
 layout(location = 1) in uvec4 a_data;
 #ifdef TAPER
-// Per-vertex line position (0 = start, 1 = end), bound from the line bucket's
-// taper buffer (see `line_taper_attributes.ts`).
+// The per-vertex value bound from the line bucket's taper buffer (see
+// `line_taper_attributes.ts`): either the normalized line position (0 = start,
+// 1 = end) for `line-width-start`/`line-width-end`, or the absolute width at the
+// vertex for `line-widths`. No explicit layout location is assigned: it is
+// linked after the data-driven paint attributes.
 in float a_taper;
 #endif
 
@@ -87,6 +90,12 @@ void main() {
     v_normal = normal;
 
 #ifdef TAPER
+#ifdef VARIABLE_WIDTH
+    // The per-vertex buffer already holds the absolute width at this vertex
+    // (`line-widths`), so it is used directly.
+    width = a_taper;
+#else
+
     // The start/end widths are per-feature values (uniform or attribute, supplied by
     // the `#pragma` mechanism below). An unset property (default -1) falls back to
     // the regular `line-width`, so setting only one side tapers from/towards it.
@@ -95,6 +104,7 @@ void main() {
     float wStart = width_start >= 0.0 ? width_start : width;
     float wEnd = width_end >= 0.0 ? width_end : width;
     width = mix(wStart, wEnd, a_taper);
+#endif
 #endif
 
     // these transformations used to be applied in the JS and native code bases.

@@ -290,4 +290,70 @@ describe('LineBucket', () => {
         }
         expect(taper[taper.length - 1]).toBe(1);
     });
+
+    test('LineBucket writes per-vertex widths from line-widths', () => {
+        const bucket = createLineBucket({
+            id: 'test',
+            paint: {
+                'line-widths': ['get', 'widths']
+            }
+        });
+
+        // 3 vertices -> 2 segments of equal length, knots at 0, 0.5 and 1.
+        bucket.addFeature({type: 2, properties: {widths: [2, 20, 40]}} as BucketFeature,
+            [[new Point(0, 0), new Point(10, 0), new Point(20, 0)]],
+            undefined, undefined, undefined, undefined, noSubdivision);
+
+        expect(bucket.taperEnabled).toBe(true);
+        expect(bucket.widthsMode).toBe(true);
+        expect(bucket.layoutTaperArray).toHaveLength(bucket.layoutVertexArray.length);
+
+        const widths = bucket.layoutTaperArray.float32.subarray(0, bucket.layoutTaperArray.length);
+        // The values are interpolated along the geometry: 2 at the start, 20 in the
+        // middle, 40 at the end, monotonic because the profile is monotonic.
+        expect(widths[0]).toBe(2);
+        expect(widths[widths.length - 1]).toBe(40);
+        for (let i = 1; i < widths.length; i++) {
+            expect(widths[i]).toBeGreaterThanOrEqual(widths[i - 1]);
+        }
+        const mid = widths[Math.floor(widths.length / 2)];
+        expect(mid).toBeCloseTo(20, 0);
+    });
+
+    test('LineBucket falls back to line-width for an empty line-widths array', () => {
+        const bucket = createLineBucket({
+            id: 'test',
+            paint: {
+                'line-width': 7,
+                'line-widths': ['get', 'widths']
+            }
+        });
+
+        bucket.addFeature({type: 2, properties: {widths: []}} as BucketFeature,
+            [[new Point(0, 0), new Point(10, 0), new Point(20, 0)]],
+            undefined, undefined, undefined, undefined, noSubdivision);
+
+        expect(bucket.widthsMode).toBe(true);
+        expect(bucket.maxVertexWidth).toBe(7);
+        const widths = bucket.layoutTaperArray.float32.subarray(0, bucket.layoutTaperArray.length);
+        expect(widths).toHaveLength(bucket.layoutVertexArray.length);
+        for (const w of widths) {
+            expect(w).toBe(7);
+        }
+    });
+
+    test('LineBucket tracks the maximum vertex width for queryRadius', () => {
+        const bucket = createLineBucket({
+            id: 'test',
+            paint: {
+                'line-widths': ['get', 'widths']
+            }
+        });
+
+        bucket.addFeature({type: 2, properties: {widths: [4, 12, 6]}} as BucketFeature,
+            [[new Point(0, 0), new Point(10, 0), new Point(20, 0)]],
+            undefined, undefined, undefined, undefined, noSubdivision);
+
+        expect(bucket.maxVertexWidth).toBe(12);
+    });
 });

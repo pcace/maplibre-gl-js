@@ -172,4 +172,59 @@ describe('LineStyleLayer.queryIntersectsFeature with tapered lines', () => {
         } as any)).toBe(false);
     });
 
+    test('per-vertex line-widths hit exactly where the line is drawn', () => {
+        const layer = createTaperLayer({
+            'line-widths': [20, 2]
+        });
+
+        // 2-vertex line (0,0)->(100,0), widths 20 at t=0 and 2 at t=1:
+        // half width 10 at start, 1 at end. Around x=50 the half width is 5.5.
+        const query = (point: Point) => layer.queryIntersectsFeature({
+            queryGeometry: [point],
+            feature,
+            featureState,
+            geometry,
+            transform,
+            pixelsToTileUnits
+        } as any);
+
+        expect(query(new Point(0, 0))).toBe(true);
+        expect(query(new Point(100, 0))).toBe(true);
+        // At the thick start.
+        expect(query(new Point(0, 9))).toBe(true);
+        expect(query(new Point(0, 11))).toBe(false);
+        // At the middle (half width 5.5).
+        expect(query(new Point(50, 5))).toBe(true);
+        expect(query(new Point(50, 8))).toBe(false);
+        // At the thin end (half width 1).
+        expect(query(new Point(100, 0.9))).toBe(true);
+        expect(query(new Point(100, 1.5))).toBe(false);
+    });
+
+    test('per-vertex line-widths respect intermediate vertex widths', () => {
+        const layer = createTaperLayer({
+            'line-widths': [2, 20, 40]
+        });
+
+        // 3-vertex line (0,0)->(50,0)->(100,0), widths 2 / 20 / 40 at the vertices,
+        // so the half width at the middle vertex is 10.
+        const midGeometry = [[new Point(0, 0), new Point(50, 0), new Point(100, 0)]];
+        const query = (point: Point) => layer.queryIntersectsFeature({
+            queryGeometry: [point],
+            feature,
+            featureState,
+            geometry: midGeometry,
+            transform,
+            pixelsToTileUnits
+        } as any);
+
+        expect(query(new Point(0, 0))).toBe(true);
+        // At the middle vertex the width is 20 -> half 10.
+        expect(query(new Point(50, 9))).toBe(true);
+        expect(query(new Point(50, 11))).toBe(false);
+        // At the end the width is 40 -> half 20.
+        expect(query(new Point(100, 15))).toBe(true);
+        expect(query(new Point(100, 21))).toBe(false);
+    });
+
 });

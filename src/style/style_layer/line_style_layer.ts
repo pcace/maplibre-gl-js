@@ -2,6 +2,7 @@ import {type QueryIntersectsFeatureParams, StyleLayer} from '../style_layer.ts';
 import {LineBucket} from '../../data/bucket/line_bucket.ts';
 import {distToSegmentSquared, polygonIntersectsBufferedMultiLine, polygonIntersectsBufferedPoint} from '../../util/intersection_tests.ts';
 import {getMaximumPaintValue, translateDistance, translate, offsetLine} from '../query_utils.ts';
+import {interpolateWidthProfile} from '../../util/interpolate_widths.ts';
 import Point from '@mapbox/point-geometry';
 import properties, {type LineLayoutPropsPossiblyEvaluated, type LinePaintPropsPossiblyEvaluated} from './line_style_layer_properties.g.ts';
 import {extend} from '../../util/util.ts';
@@ -112,20 +113,31 @@ export class LineStyleLayer extends StyleLayer {
         const lineWidthStart = this.paint.get('line-width-start').evaluate(feature, featureState);
         const lineWidthEnd = this.paint.get('line-width-end').evaluate(feature, featureState);
         const lineGapWidth = this.paint.get('line-gap-width').evaluate(feature, featureState);
+        const lineWidths = this.paint.get('line-widths').evaluate(feature, featureState);
+        const hasVertexWidths = Array.isArray(lineWidths) && lineWidths.length > 0;
 
-        // No taper for this feature: use the original constant-width path.
-        if (lineWidthStart < 0 && lineWidthEnd < 0) {
+        // No per-feature width variation: use the original constant-width path.
+        if (!hasVertexWidths && lineWidthStart < 0 && lineWidthEnd < 0) {
             return polygonIntersectsBufferedMultiLine(translatedPolygon, geometry,
                 pixelsToTileUnits / 2 * getLineWidth(lineWidth, lineGapWidth));
         }
 
-        // Tapered: the width varies linearly along each line between line-width-start
-        // and line-width-end (an unset side falls back to line-width), exactly like
-        // the vertex shader interpolates it. The hit test therefore uses a variable
-        // buffer radius instead of a constant maximum, so only the part of the line
+        // The width varies along each line (per-vertex `line-widths`, or linearly
+        // between `line-width-start` and `line-width-end` with an unset side falling
+        // back to `line-width`), exactly like the vertex shader renders it. The hit
+        // test therefore uses a variable buffer radius: only the part of the line
         // that is actually drawn is clickable.
-        const localHalfWidth = (t: number) =>
-            pixelsToTileUnits / 2 * getLineWidth(taperWidthAt(t, lineWidth, lineWidthStart, lineWidthEnd), lineGapWidth);
+        const toHalfWidth = (w: number) => pixelsToTileUnits / 2 * getLineWidth(w, lineGapWidth);
+        let localHalfWidth: (t: number, line?: Point[]) => number;
+        if (hasVertexWidths) {
+            const widths = lineWidths.map(Number);
+            localHalfWidth = (t, line) => toHalfWidth(
+                line?.length === widths.length ?
+                    interpolateWidthProfile(widths, lineKnots(line), t) :
+                    interpolateWidthProfile(widths, [], t));
+        } else {
+            localHalfWidth = (t) => toHalfWidth(taperWidthAt(t, lineWidth, lineWidthStart, lineWidthEnd));
+        }
         return polygonIntersectsBufferedTaperedLine(translatedPolygon, geometry, localHalfWidth, pixelsToTileUnits);
     }
 
@@ -168,18 +180,28 @@ function lineDistances(line: Point[]): {total: number; distances: number[]} {
 }
 
 /**
+ * Normalized cumulative distance (0..1) of every vertex of a line, matching the
+ * per-vertex `line-widths` array so a width given at a vertex is reproduced
+ * exactly there.
+ */
+function lineKnots(line: Point[]): number[] {
+    const {total, distances} = lineDistances(line);
+    return distances.map((d) => total > 0 ? d / total : 0);
+}
+
+/**
  * Whether a query point lies within the variable buffer radius of a line,
- * where the radius is `radiusAt(globalT)` with `globalT` the normalized
+ * where the radius is `radiusAt(globalT, line)` with `globalT` the normalized
  * distance along the line (0..1). Matches how the tapered line is drawn.
  */
-function pointIntersectsBufferedTaperedLine(p: Point, line: Point[], radiusAt: (t: number) => number): boolean {
+function pointIntersectsBufferedTaperedLine(p: Point, line: Point[], radiusAt: (t: number, line?: Point[]) => number): boolean {
     if (line.length === 1) {
-        const r = radiusAt(0);
+        const r = radiusAt(0, line);
         return p.distSqr(line[0]) < r * r;
     }
     const {total, distances} = lineDistances(line);
     if (total === 0) {
-        const r = radiusAt(0);
+        const r = radiusAt(0, line);
         return p.distSqr(line[0]) < r * r;
     }
     for (let i = 1; i < line.length; i++) {
@@ -193,7 +215,7 @@ function pointIntersectsBufferedTaperedLine(p: Point, line: Point[], radiusAt: (
             const projected = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
             t = Math.max(0, Math.min(1, projected));
         }
-        const r = radiusAt((distances[i - 1] + segmentLength * t) / total);
+        const r = radiusAt((distances[i - 1] + segmentLength * t) / total, line);
         if (distToSegmentSquared(p, v, w) < r * r) return true;
     }
     return false;
@@ -204,7 +226,7 @@ function pointIntersectsBufferedTaperedLine(p: Point, line: Point[], radiusAt: (
  * For a single-point query this is exact; for a polygon the line is densely
  * sampled (bounded) and each sample disc is tested against the polygon.
  */
-function polygonIntersectsBufferedTaperedLine(polygon: Point[], multiLine: Point[][], radiusAt: (t: number) => number, minStep: number): boolean {
+function polygonIntersectsBufferedTaperedLine(polygon: Point[], multiLine: Point[][], radiusAt: (t: number, line?: Point[]) => number, minStep: number): boolean {
     if (polygon.length === 1) {
         for (const line of multiLine) {
             if (pointIntersectsBufferedTaperedLine(polygon[0], line, radiusAt)) return true;
@@ -214,12 +236,12 @@ function polygonIntersectsBufferedTaperedLine(polygon: Point[], multiLine: Point
 
     for (const line of multiLine) {
         if (line.length === 1) {
-            if (polygonIntersectsBufferedPoint(polygon, line[0], radiusAt(0))) return true;
+            if (polygonIntersectsBufferedPoint(polygon, line[0], radiusAt(0, line))) return true;
             continue;
         }
         const {total, distances} = lineDistances(line);
         if (total === 0) {
-            if (polygonIntersectsBufferedPoint(polygon, line[0], radiusAt(0))) return true;
+            if (polygonIntersectsBufferedPoint(polygon, line[0], radiusAt(0, line))) return true;
             continue;
         }
         for (let i = 1; i < line.length; i++) {
@@ -228,13 +250,13 @@ function polygonIntersectsBufferedTaperedLine(polygon: Point[], multiLine: Point
             const segmentLength = v.dist(w);
             // Sample often enough to follow both the line and the varying radius,
             // bounded so degenerate geometry cannot create a huge sample count.
-            const maxR = Math.max(radiusAt(distances[i - 1] / total), radiusAt(distances[i] / total));
+            const maxR = Math.max(radiusAt(distances[i - 1] / total, line), radiusAt(distances[i] / total, line));
             const samples = Math.min(Math.max(1, Math.ceil(segmentLength / Math.max(minStep, maxR * 0.5))), 64);
             for (let j = 0; j <= samples; j++) {
                 const t = j / samples;
                 const point = new Point(v.x + (w.x - v.x) * t, v.y + (w.y - v.y) * t);
                 const globalT = (distances[i - 1] + segmentLength * t) / total;
-                if (polygonIntersectsBufferedPoint(polygon, point, radiusAt(globalT))) return true;
+                if (polygonIntersectsBufferedPoint(polygon, point, radiusAt(globalT, line))) return true;
             }
         }
     }
@@ -243,13 +265,16 @@ function polygonIntersectsBufferedTaperedLine(polygon: Point[], multiLine: Point
 
 /**
  * The widest width a feature of this bucket can render at, including the tapered
- * start/end widths. Unset taper properties (default -1) are simply ignored.
+ * start/end widths and the per-vertex `line-widths` (tracked by the bucket, since
+ * data-driven arrays cannot be handled by the paint binder's max-value tracking).
+ * Unset taper properties (default -1) are simply ignored.
  */
 function getMaxLineWidth(layer: LineStyleLayer, bucket: LineBucket): number {
     const width = Math.max(
         getMaximumPaintValue('line-width', layer, bucket),
         getMaximumPaintValue('line-width-start', layer, bucket),
-        getMaximumPaintValue('line-width-end', layer, bucket)
+        getMaximumPaintValue('line-width-end', layer, bucket),
+        bucket.maxVertexWidth || 0
     );
     return getLineWidth(width, getMaximumPaintValue('line-gap-width', layer, bucket));
 }

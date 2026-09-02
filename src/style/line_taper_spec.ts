@@ -10,6 +10,11 @@ import type {StylePropertySpecification} from '@maplibre/maplibre-gl-style-spec'
  * is interpolated between the two values along the length of each line. The default
  * of `-1` means "not set" — the line vertex shader then falls back to `line-width`,
  * and the line bucket skips the per-vertex taper buffer entirely.
+ *
+ * `line-widths` implements per-vertex widths: a data-driven array of numbers, one
+ * per vertex of the line, which the bucket writes directly into the per-vertex
+ * buffer. It takes precedence over `line-width-start`/`line-width-end`. The
+ * default of `[]` means "not set".
  */
 export const lineTaperPaintSpecs: {[name: string]: StylePropertySpecification} = {
     'line-width-start': {
@@ -25,6 +30,14 @@ export const lineTaperPaintSpecs: {[name: string]: StylePropertySpecification} =
         transition: true,
         'property-type': 'data-driven',
         expression: {interpolated: true, parameters: ['zoom', 'feature']}
+    },
+    'line-widths': {
+        type: 'array',
+        value: 'number',
+        default: [],
+        transition: false,
+        'property-type': 'data-driven',
+        expression: {interpolated: false, parameters: ['zoom', 'feature']}
     }
 };
 

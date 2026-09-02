@@ -3,6 +3,7 @@ import {GEOJSONVT_CLIP_END, GEOJSONVT_CLIP_START} from '@maplibre/geojson-vt';
 import {members as layoutAttributes} from './line_attributes.ts';
 import {members as layoutAttributesExt} from './line_attributes_ext.ts';
 import {members as taperAttributes} from './line_taper_attributes.ts';
+import {interpolateWidthProfile} from '../../util/interpolate_widths.ts';
 import {SegmentVector} from '../segment.ts';
 import {ProgramConfigurationSet} from '../program_configuration.ts';
 import {TriangleIndexArray} from '../array_types.g.ts';
@@ -126,6 +127,22 @@ export class LineBucket implements Bucket {
     // Total length of the current line, used to normalize `taperDistance` into a 0..1 factor.
     lineLength: number;
 
+    // Per-vertex widths (`line-widths`). When active, the per-vertex buffer holds the
+    // absolute width at each vertex (instead of a normalized taper factor), taking
+    // precedence over `line-width-start`/`line-width-end`.
+    widthsMode: boolean;
+    // The resolved widths array for the feature currently being added (may be empty).
+    lineWidths: number[] | null;
+    // The evaluated `line-width` of the current feature, used as fallback when the
+    // widths array is empty.
+    currentLineWidth: number;
+    // Normalized cumulative distance of each vertex of the current line (0..1), aligned
+    // with `lineWidths` and used to linearly interpolate widths along the geometry.
+    lineKnots: number[] | null;
+    // The widest width ever written into the per-vertex buffer, used as a conservative
+    // query pre-filter (data-driven arrays cannot be handled by the paint binder).
+    maxVertexWidth: number;
+
     indexArray: TriangleIndexArray;
     indexBuffer: IndexBuffer;
 
@@ -152,23 +169,35 @@ export class LineBucket implements Bucket {
         this.layoutVertexArray2 = new LineExtLayoutArray();
         this.layoutTaperArray = new LineTaperLayoutArray();
         this.taperEnabled = false;
+        this.widthsMode = false;
+        this.lineWidths = null;
+        this.currentLineWidth = 0;
+        this.lineKnots = null;
+        this.maxVertexWidth = 0;
         this.taperDistance = 0;
         this.lineLength = 0;
         this.indexArray = new TriangleIndexArray();
-        this.programConfigurations = new ProgramConfigurationSet(options.layers, options.zoom);
+        // Arrays cannot be packed into vertex attributes, so `line-widths` is evaluated
+        // per feature right here in the bucket and excluded from the paint binder.
+        this.programConfigurations = new ProgramConfigurationSet(options.layers, options.zoom,
+            (property) => property !== 'line-widths');
         this.segments = new SegmentVector();
         this.maxLineLength = 0;
 
         this.stateDependentLayerIds = this.layers.filter((l) => l.isStateDependent()).map((l) => l.id);
 
-        // Tapered lines: when a layer sets `line-width-start` and/or `line-width-end`
-        // (the property default of -1 means "not set"), each vertex stores its position
-        // along the line (0..1) in the taper buffer and the shader interpolates the width
-        // between the two values. Because the stored value is a pure geometry factor, the
-        // start/end widths themselves stay free to be zoom- and feature-driven uniforms.
-        // A non-constant (data-driven) value is treated as active too, since it cannot be
-        // known to be -1 for every feature.
-        this.taperEnabled = this.layers.some((layer) => {
+        // Per-vertex widths take precedence over the two-sided taper. A property is
+        // active when it is data-driven (cannot be known to be empty/-1 for every
+        // feature) or when its constant value differs from the default. When active,
+        // each vertex stores its position along the line (0..1) in the taper buffer and
+        // the shader interpolates the width between `line-width-start`/`line-width-end`
+        // or reads the absolute per-vertex width directly.
+        this.widthsMode = this.layers.some((layer) => {
+            const widths = layer.paint.get('line-widths');
+            const constant = widths.constantOr(null);
+            return !widths.isConstant() || (Array.isArray(constant) && constant.length > 0);
+        });
+        this.taperEnabled = this.widthsMode || this.layers.some((layer) => {
             const widthStart = layer.paint.get('line-width-start');
             const widthEnd = layer.paint.get('line-width-end');
             return widthStart.constantOr(-1) >= 0 || widthEnd.constantOr(-1) >= 0 ||
@@ -300,6 +329,21 @@ export class LineBucket implements Bucket {
         const roundLimit = layout.get('line-round-limit').evaluate(feature, {});
         this.lineClips = this.lineFeatureClips(feature);
 
+        // Per-vertex widths: evaluate the data-driven array for this feature. An empty
+        // or missing array falls back to `line-width`.
+        if (this.widthsMode) {
+            const widths = this.layers[0].paint.get('line-widths').evaluate(feature, {});
+            this.lineWidths = Array.isArray(widths) && widths.length > 0 ? widths.map(Number) : null;
+            this.currentLineWidth = this.layers[0].paint.get('line-width').evaluate(feature, {});
+            if (this.lineWidths) {
+                for (const w of this.lineWidths) {
+                    if (w > this.maxVertexWidth) this.maxVertexWidth = w;
+                }
+            } else if (this.currentLineWidth > this.maxVertexWidth) {
+                this.maxVertexWidth = this.currentLineWidth;
+            }
+        }
+
         for (const line of geometry) {
             this.addLine(line, feature, join, cap, miterLimit, roundLimit, canonical, subdivisionGranularity);
         }
@@ -352,6 +396,23 @@ export class LineBucket implements Bucket {
                 length += vertices[i].dist(vertices[i + 1]);
             }
             this.lineLength = length;
+
+            // Per-vertex widths: record the normalized cumulative distance of every
+            // vertex so a width given at a vertex is reproduced exactly there, and
+            // anything in between (e.g. globe subdivision) interpolates along the
+            // actual geometry. Falls back to evenly spaced stops if the array length
+            // does not match the vertex count.
+            if (this.widthsMode) {
+                this.lineKnots = new Array(len - first);
+                this.lineKnots[0] = 0;
+                let cum = 0;
+                for (let i = first, k = 1; i < len - 1; i++, k++) {
+                    cum += vertices[i].dist(vertices[i + 1]);
+                    this.lineKnots[k] = length > 0 ? cum / length : 0;
+                }
+            } else {
+                this.lineKnots = null;
+            }
         }
 
         if (join === 'bevel') miterLimit = 1.05;
@@ -603,13 +664,25 @@ export class LineBucket implements Bucket {
         // scale down so that we can store longer distances while sacrificing precision.
         const linesofarScaled = totalDistance * LINE_DISTANCE_SCALE;
 
-        // Tapered lines: store this vertex's normalized position along the line so the
-        // shader can interpolate the width between `line-width-start`/`line-width-end`.
-        // `taperDistance` is intentionally used (not `distance`, which may wrap around for
-        // very long un-clipped lines) so the factor stays monotonic 0..1.
+        // Per-vertex widths or taper factor: when a layer uses `line-widths`,
+        // this vertex stores the absolute width at its position (interpolated along
+        // the geometry between the given per-vertex widths). Otherwise it stores the
+        // normalized position along the line so the shader can interpolate the width
+        // between `line-width-start`/`line-width-end`. `taperDistance` is intentionally
+        // used (not `distance`, which may wrap around for very long un-clipped lines)
+        // so the factor stays monotonic 0..1.
         if (this.taperEnabled) {
-            const taper = this.lineLength > 0 ? Math.min(this.taperDistance / this.lineLength, 1) : 0;
-            this.layoutTaperArray.emplaceBack(taper);
+            const factor = this.lineLength > 0 ? Math.min(this.taperDistance / this.lineLength, 1) : 0;
+            let value;
+            if (this.widthsMode) {
+                const widths = this.lineWidths;
+                value = (widths && widths.length > 0 && this.lineKnots) ?
+                    interpolateWidthProfile(widths, this.lineKnots, factor) :
+                    this.currentLineWidth;
+            } else {
+                value = factor;
+            }
+            this.layoutTaperArray.emplaceBack(value);
         }
 
         this.layoutVertexArray.emplaceBack(
