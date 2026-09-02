@@ -15,15 +15,7 @@ export type LineUniformsType = {
     'u_ratio': Uniform1f;
     'u_device_pixel_ratio': Uniform1f;
     'u_units_to_pixels': Uniform2f;
-} & Partial<LineTaperUniformsType>;
-
-/** Extra uniforms used when tapered lines (`line-width-start`/`line-width-end`) are active. */
-export type LineTaperUniformsType = {
-    'u_width_start': Uniform1f;
-    'u_width_end': Uniform1f;
 };
-
-export type LineUniformValuesType = UniformValues<LineUniformsType> & Partial<UniformValues<LineTaperUniformsType>>;
 
 export type LineGradientUniformsType = {
     'u_translation': Uniform2f;
@@ -32,7 +24,7 @@ export type LineGradientUniformsType = {
     'u_units_to_pixels': Uniform2f;
     'u_image': Uniform1i;
     'u_image_height': Uniform1f;
-} & Partial<LineTaperUniformsType>;
+};
 
 export type LinePatternUniformsType = {
     'u_translation': Uniform2f;
@@ -43,7 +35,7 @@ export type LinePatternUniformsType = {
     'u_image': Uniform1i;
     'u_scale': Uniform3f;
     'u_fade': Uniform1f;
-} & Partial<LineTaperUniformsType>;
+};
 
 export type LineSDFUniformsType = {
     'u_translation': Uniform2f;
@@ -57,7 +49,7 @@ export type LineSDFUniformsType = {
     'u_mix': Uniform1f;
     'u_lineatlas_width': Uniform1f;
     'u_lineatlas_height': Uniform1f;
-} & Partial<LineTaperUniformsType>;
+};
 
 export type LineGradientSDFUniformsType = {
     'u_translation': Uniform2f;
@@ -79,24 +71,8 @@ const lineUniforms = (context: Context, locations: UniformLocations): LineUnifor
     'u_translation': new Uniform2f(context, locations.u_translation),
     'u_ratio': new Uniform1f(context, locations.u_ratio),
     'u_device_pixel_ratio': new Uniform1f(context, locations.u_device_pixel_ratio),
-    'u_units_to_pixels': new Uniform2f(context, locations.u_units_to_pixels),
-    ...taperUniforms(context, locations)
+    'u_units_to_pixels': new Uniform2f(context, locations.u_units_to_pixels)
 });
-
-/**
- * Binds the taper width uniforms when the shader was compiled with `#define TAPER`
- * (i.e. the locations are present). Returns an empty object for regular lines, so the
- * uniforms are simply not part of `fixedUniforms` and never touched.
- */
-function taperUniforms(context: Context, locations: UniformLocations): Partial<LineTaperUniformsType> {
-    if (locations.u_width_start && locations.u_width_end) {
-        return {
-            'u_width_start': new Uniform1f(context, locations.u_width_start),
-            'u_width_end': new Uniform1f(context, locations.u_width_end)
-        };
-    }
-    return {};
-}
 
 const lineGradientUniforms = (context: Context, locations: UniformLocations): LineGradientUniformsType => ({
     'u_translation': new Uniform2f(context, locations.u_translation),
@@ -104,8 +80,7 @@ const lineGradientUniforms = (context: Context, locations: UniformLocations): Li
     'u_device_pixel_ratio': new Uniform1f(context, locations.u_device_pixel_ratio),
     'u_units_to_pixels': new Uniform2f(context, locations.u_units_to_pixels),
     'u_image': new Uniform1i(context, locations.u_image),
-    'u_image_height': new Uniform1f(context, locations.u_image_height),
-    ...taperUniforms(context, locations)
+    'u_image_height': new Uniform1f(context, locations.u_image_height)
 });
 
 const linePatternUniforms = (context: Context, locations: UniformLocations): LinePatternUniformsType => ({
@@ -116,8 +91,7 @@ const linePatternUniforms = (context: Context, locations: UniformLocations): Lin
     'u_image': new Uniform1i(context, locations.u_image),
     'u_units_to_pixels': new Uniform2f(context, locations.u_units_to_pixels),
     'u_scale': new Uniform3f(context, locations.u_scale),
-    'u_fade': new Uniform1f(context, locations.u_fade),
-    ...taperUniforms(context, locations)
+    'u_fade': new Uniform1f(context, locations.u_fade)
 });
 
 const lineSDFUniforms = (context: Context, locations: UniformLocations): LineSDFUniformsType => ({
@@ -131,8 +105,7 @@ const lineSDFUniforms = (context: Context, locations: UniformLocations): LineSDF
     'u_crossfade_from': new Uniform1f(context, locations.u_crossfade_from),
     'u_crossfade_to': new Uniform1f(context, locations.u_crossfade_to),
     'u_lineatlas_width': new Uniform1f(context, locations.u_lineatlas_width),
-    'u_lineatlas_height': new Uniform1f(context, locations.u_lineatlas_height),
-    ...taperUniforms(context, locations)
+    'u_lineatlas_height': new Uniform1f(context, locations.u_lineatlas_height)
 });
 
 const lineGradientSDFUniforms = (context: Context, locations: UniformLocations): LineGradientSDFUniformsType => ({
@@ -148,8 +121,7 @@ const lineGradientSDFUniforms = (context: Context, locations: UniformLocations):
     'u_image_dash': new Uniform1i(context, locations.u_image_dash),
     'u_mix': new Uniform1f(context, locations.u_mix),
     'u_lineatlas_width': new Uniform1f(context, locations.u_lineatlas_width),
-    'u_lineatlas_height': new Uniform1f(context, locations.u_lineatlas_height),
-    ...taperUniforms(context, locations)
+    'u_lineatlas_height': new Uniform1f(context, locations.u_lineatlas_height)
 });
 
 const lineUniformValues = (
@@ -157,8 +129,7 @@ const lineUniformValues = (
     tile: Tile,
     layer: LineStyleLayer,
     ratioScale: number,
-    taper?: [number, number],
-): LineUniformValuesType => {
+): UniformValues<LineUniformsType> => {
     const transform = painter.transform;
 
     return {
@@ -168,8 +139,7 @@ const lineUniformValues = (
         'u_units_to_pixels': [
             1 / transform.pixelsToGLUnits[0],
             1 / transform.pixelsToGLUnits[1]
-        ],
-        ...(taper && {'u_width_start': taper[0], 'u_width_end': taper[1]})
+        ]
     };
 };
 
@@ -179,9 +149,8 @@ const lineGradientUniformValues = (
     layer: LineStyleLayer,
     ratioScale: number,
     imageHeight: number,
-    taper?: [number, number],
-): UniformValues<LineGradientUniformsType> & Partial<UniformValues<LineTaperUniformsType>> => {
-    return extend(lineUniformValues(painter, tile, layer, ratioScale, taper), {
+): UniformValues<LineGradientUniformsType> => {
+    return extend(lineUniformValues(painter, tile, layer, ratioScale), {
         'u_image': 0,
         'u_image_height': imageHeight,
     });
@@ -193,8 +162,7 @@ const linePatternUniformValues = (
     layer: LineStyleLayer,
     ratioScale: number,
     crossfade: CrossfadeParameters,
-    taper?: [number, number],
-): UniformValues<LinePatternUniformsType> & Partial<UniformValues<LineTaperUniformsType>> => {
+): UniformValues<LinePatternUniformsType> => {
     const transform = painter.transform;
     const tileZoomRatio = calculateTileRatio(tile, transform);
     return {
@@ -209,8 +177,7 @@ const linePatternUniformValues = (
         'u_units_to_pixels': [
             1 / transform.pixelsToGLUnits[0],
             1 / transform.pixelsToGLUnits[1]
-        ],
-        ...(taper && {'u_width_start': taper[0], 'u_width_end': taper[1]})
+        ]
     };
 };
 
@@ -220,12 +187,11 @@ const lineSDFUniformValues = (
     layer: LineStyleLayer,
     ratioScale: number,
     crossfade: CrossfadeParameters,
-    taper?: [number, number],
-): UniformValues<LineSDFUniformsType> & Partial<UniformValues<LineTaperUniformsType>> => {
+): UniformValues<LineSDFUniformsType> => {
     const transform = painter.transform;
     const tileRatio = calculateTileRatio(tile, transform);
 
-    return extend(lineUniformValues(painter, tile, layer, ratioScale, taper), {
+    return extend(lineUniformValues(painter, tile, layer, ratioScale), {
         'u_tileratio': tileRatio,
         'u_crossfade_from': crossfade.fromScale,
         'u_crossfade_to': crossfade.toScale,
@@ -243,12 +209,11 @@ const lineGradientSDFUniformValues = (
     ratioScale: number,
     crossfade: CrossfadeParameters,
     imageHeight: number,
-    taper?: [number, number],
-): UniformValues<LineGradientSDFUniformsType> & Partial<UniformValues<LineTaperUniformsType>> => {
+): UniformValues<LineGradientSDFUniformsType> => {
     const transform = painter.transform;
     const tileRatio = calculateTileRatio(tile, transform);
 
-    return extend(lineUniformValues(painter, tile, layer, ratioScale, taper), {
+    return extend(lineUniformValues(painter, tile, layer, ratioScale), {
         'u_image': 0,
         'u_image_height': imageHeight,
         'u_tileratio': tileRatio,

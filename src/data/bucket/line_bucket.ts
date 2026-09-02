@@ -166,9 +166,14 @@ export class LineBucket implements Bucket {
         // along the line (0..1) in the taper buffer and the shader interpolates the width
         // between the two values. Because the stored value is a pure geometry factor, the
         // start/end widths themselves stay free to be zoom- and feature-driven uniforms.
-        this.taperEnabled = this.layers.some((layer) =>
-            layer.paint.get('line-width-start') >= 0 ||
-            layer.paint.get('line-width-end') >= 0);
+        // A non-constant (data-driven) value is treated as active too, since it cannot be
+        // known to be -1 for every feature.
+        this.taperEnabled = this.layers.some((layer) => {
+            const widthStart = layer.paint.get('line-width-start');
+            const widthEnd = layer.paint.get('line-width-end');
+            return widthStart.constantOr(-1) >= 0 || widthEnd.constantOr(-1) >= 0 ||
+                !widthStart.isConstant() || !widthEnd.isConstant();
+        });
     }
 
     populate(features: IndexedFeature[], options: PopulateParameters, canonical: CanonicalTileID): void {

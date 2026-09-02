@@ -16,15 +16,15 @@ export const lineTaperPaintSpecs: {[name: string]: StylePropertySpecification} =
         type: 'number',
         default: -1,
         transition: true,
-        'property-type': 'data-constant',
-        expression: {interpolated: true, parameters: ['zoom']}
+        'property-type': 'data-driven',
+        expression: {interpolated: true, parameters: ['zoom', 'feature']}
     },
     'line-width-end': {
         type: 'number',
         default: -1,
         transition: true,
-        'property-type': 'data-constant',
-        expression: {interpolated: true, parameters: ['zoom']}
+        'property-type': 'data-driven',
+        expression: {interpolated: true, parameters: ['zoom', 'feature']}
     }
 };
 

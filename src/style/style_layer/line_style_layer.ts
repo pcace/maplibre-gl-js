@@ -84,9 +84,7 @@ export class LineStyleLayer extends StyleLayer {
 
     queryRadius(bucket: Bucket): number {
         const lineBucket: LineBucket = (bucket as any);
-        const width = getLineWidth(
-            getMaximumPaintValue('line-width', this, lineBucket),
-            getMaximumPaintValue('line-gap-width', this, lineBucket));
+        const width = getMaxLineWidth(this, lineBucket);
         const offset = getMaximumPaintValue('line-offset', this, lineBucket);
         return width / 2 + Math.abs(offset) + translateDistance(this.paint.get('line-translate'));
     }
@@ -104,7 +102,11 @@ export class LineStyleLayer extends StyleLayer {
             this.paint.get('line-translate-anchor'),
             -transform.bearingInRadians, pixelsToTileUnits);
         const halfWidth = pixelsToTileUnits / 2 * getLineWidth(
-            this.paint.get('line-width').evaluate(feature, featureState),
+            Math.max(
+                this.paint.get('line-width').evaluate(feature, featureState),
+                this.paint.get('line-width-start').evaluate(feature, featureState),
+                this.paint.get('line-width-end').evaluate(feature, featureState)
+            ),
             this.paint.get('line-gap-width').evaluate(feature, featureState));
         const lineOffset = this.paint.get('line-offset').evaluate(feature, featureState);
         if (lineOffset) {
@@ -125,4 +127,17 @@ function getLineWidth(lineWidth: number, lineGapWidth: number): number {
     } else {
         return lineWidth;
     }
+}
+
+/**
+ * The widest width a feature of this bucket can render at, including the tapered
+ * start/end widths. Unset taper properties (default -1) are simply ignored.
+ */
+function getMaxLineWidth(layer: LineStyleLayer, bucket: LineBucket): number {
+    const width = Math.max(
+        getMaximumPaintValue('line-width', layer, bucket),
+        getMaximumPaintValue('line-width-start', layer, bucket),
+        getMaximumPaintValue('line-width-end', layer, bucket)
+    );
+    return getLineWidth(width, getMaximumPaintValue('line-gap-width', layer, bucket));
 }

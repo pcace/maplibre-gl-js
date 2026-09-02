@@ -180,20 +180,16 @@ function drawLineTiles(
     const gradient = layer.paint.get('line-gradient');
     const crossfade = layer.getCrossfadeParameters();
 
-    // Tapered lines: when `line-width-start` and/or `line-width-end` are set (the
-    // property default is -1 = "not set"), the width is interpolated along the line.
-    // The shader is compiled with `#define TAPER` and reads the two widths plus the
-    // per-vertex `a_taper` factor from the bucket's taper buffer. The unset side falls
-    // back to `line-width`, so setting only one property tapers from/towards the
-    // regular width.
-    const lineWidth = layer.paint.get('line-width').constantOr(1);
+    // Tapered lines: active when `line-width-start` and/or `line-width-end` are set
+    // (the property default is -1 = "not set"). The shader is compiled with
+    // `#define TAPER` and reads the two widths plus the per-vertex `a_taper` factor
+    // from the bucket's taper buffer. The widths are per-feature values bound by the
+    // paint binder (uniform for constants, attribute for data-driven expressions);
+    // an unset side falls back to `line-width` in the shader.
     const lineWidthStart = layer.paint.get('line-width-start');
     const lineWidthEnd = layer.paint.get('line-width-end');
-    const taper: [number, number] | undefined =
-        (lineWidthStart >= 0 || lineWidthEnd >= 0) ?
-            [lineWidthStart >= 0 ? lineWidthStart : lineWidth,
-                lineWidthEnd >= 0 ? lineWidthEnd : lineWidth] :
-            undefined;
+    const taper = lineWidthStart.constantOr(-1) >= 0 || lineWidthEnd.constantOr(-1) >= 0 ||
+        !lineWidthStart.isConstant() || !lineWidthEnd.isConstant();
     const defines = taper ? ['#define TAPER;'] : [];
 
     let programId: string;
@@ -248,19 +244,19 @@ function drawLineTiles(
 
         let uniformValues;
         if (image) {
-            uniformValues = linePatternUniformValues(painter, tile, layer, pixelRatio, crossfade, taper);
+            uniformValues = linePatternUniformValues(painter, tile, layer, pixelRatio, crossfade);
             bindImagePatternTextures(context, gl, tile, programConfiguration, crossfade);
         } else if (dasharray && gradient) {
-            uniformValues = lineGradientSDFUniformValues(painter, tile, layer, pixelRatio, crossfade, bucket.lineClipsArray.length, taper);
+            uniformValues = lineGradientSDFUniformValues(painter, tile, layer, pixelRatio, crossfade, bucket.lineClipsArray.length);
             bindGradientAndDashTextures(painter, tileManager, context, gl, layer, bucket, coord, programConfiguration, crossfade);
         } else if (dasharray) {
-            uniformValues = lineSDFUniformValues(painter, tile, layer, pixelRatio, crossfade, taper);
+            uniformValues = lineSDFUniformValues(painter, tile, layer, pixelRatio, crossfade);
             bindDasharrayTextures(painter, context, gl, programConfiguration, programChanged, crossfade);
         } else if (gradient) {
-            uniformValues = lineGradientUniformValues(painter, tile, layer, pixelRatio, bucket.lineClipsArray.length, taper);
+            uniformValues = lineGradientUniformValues(painter, tile, layer, pixelRatio, bucket.lineClipsArray.length);
             bindGradientTextures(painter, tileManager, context, gl, layer, bucket, coord);
         } else {
-            uniformValues = lineUniformValues(painter, tile, layer, pixelRatio, taper);
+            uniformValues = lineUniformValues(painter, tile, layer, pixelRatio);
         }
 
         const stencil = painter.stencilModeForClipping(coord);

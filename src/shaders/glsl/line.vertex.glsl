@@ -19,13 +19,6 @@ uniform vec2 u_translation;
 uniform mediump float u_ratio;
 uniform vec2 u_units_to_pixels;
 uniform lowp float u_device_pixel_ratio;
-#ifdef TAPER
-// Tapered lines: the width varies along the line between `line-width-start`
-// and `line-width-end`. The two are uniform (per feature, as with `line-width`)
-// while `a_taper` (0 = start, 1 = end) varies per vertex.
-uniform lowp float u_width_start;
-uniform lowp float u_width_end;
-#endif
 
 out vec2 v_normal;
 #ifdef TAPER
@@ -45,6 +38,10 @@ out float v_depth;
 #pragma maplibre: define mediump float gapwidth
 #pragma maplibre: define lowp float offset
 #pragma maplibre: define mediump float width
+#ifdef TAPER
+#pragma maplibre: define mediump float width_start
+#pragma maplibre: define mediump float width_end
+#endif
 
 void main() {
     #pragma maplibre: initialize highp vec4 color
@@ -79,10 +76,14 @@ void main() {
     v_normal = normal;
 
 #ifdef TAPER
-    // Interpolate the line width along the line. `a_taper` runs from 0 at the
-    // start to 1 at the end of each line; a value below/above that range (from
-    // the duplicate vertices of caps and joins) is clamped by `mix`.
-    width = mix(u_width_start, u_width_end, a_taper);
+    // The start/end widths are per-feature values (uniform or attribute, supplied by
+    // the `#pragma` mechanism below). An unset property (default -1) falls back to
+    // the regular `line-width`, so setting only one side tapers from/towards it.
+    #pragma maplibre: initialize mediump float width_start
+    #pragma maplibre: initialize mediump float width_end
+    float wStart = width_start >= 0.0 ? width_start : width;
+    float wEnd = width_end >= 0.0 ? width_end : width;
+    width = mix(wStart, wEnd, a_taper);
 #endif
 
     // these transformations used to be applied in the JS and native code bases.

@@ -30,16 +30,18 @@ Faktor und glatte Interpolation nach dem Fragment-Shader.
 
 ### 1. Zwei neue Paint-Properties: `line-width-start`, `line-width-end`
 
-- Typ `number`, `data-constant`, Zoom-getrieben (interpolierbar), wie
+- Typ `number`, **`data-driven`** (Zoom + Feature), interpolierbar, wie
   `line-width`.
 - Default `-1` = "nicht gesetzt". Damit ist die Feature-Vollrückwärtskompatibel:
   Ohne die Properties wird exakt der bisherige Codepfad genutzt.
 - Nur **eine** gesetzte Property reicht: Die ungesetzte Seite fällt auf
   `line-width` zurück (z. B. nur `line-width-start` setzen → Linie verjüngt
   sich von Startbreite auf normale Breite).
-- Beide Werte bleiben **Uniforms** (`u_width_start`/`u_width_end`), also pro
-  Feature/Frame — sie können weiterhin Zoom-getrieben oder später auch
-  daten-getrieben sein, ohne dass der Taper-Mechanismus sich ändert.
+- Da beide Werte `data-driven` sind, laufen sie durch den normalen
+  Paint-Binder: konstante Werte → Uniforms (`u_width_start`/`u_width_end`),
+  Daten-/Zoom-Ausdrücke → per-Feature-Attribute (`a_width_start`/
+  `a_width_end`). Der Taper-Mechanismus selbst ist davon unabhängig, weil der
+  Shader die Werte über das `#pragma`-System bekommt.
 
 > Warum nicht daten-getrieben pro Vertex in `line-width`? MapLibres
 > Expressionsystem hat keinen "per-Vertex"-Kontext (nur pro Feature) und die
@@ -72,9 +74,12 @@ Faktor und glatte Interpolation nach dem Fragment-Shader.
   `lineGradientSDF`) bekommen einen `#ifdef TAPER`-Zweig:
   - `in float a_taper;` (keine feste `layout(location)`, wird vom Linker nach
     den Paint-Attributen vergeben)
-  - `uniform lowp float u_width_start; uniform lowp float u_width_end;`
-  - nach dem `#pragma ... initialize width`: `width = mix(u_width_start,
-    u_width_end, a_taper);`
+  - `#pragma maplibre: define mediump float width_start` / `width_end` (unter
+    `#ifdef TAPER`) → liefert je nach Wert `u_width_start`-Uniform oder
+    `a_width_start`-Attribut (per-Feature), wie bei `line-width` selbst.
+  - nach dem `#pragma ... initialize width`:
+    `width = mix(wStart, wEnd, a_taper);` wobei eine ungesetzte Seite
+    (`< 0`, d.h. Default `-1`) auf `line-width` zurückfällt.
   - `v_width2` wird unter TAPER **smooth** (`out vec2` statt `flat out
     vec2`), im Fragment entsprechend `in` statt `flat in`. Nur der TAPER-Pfad
     interpoliert also — ohne TAPER bleibt alles `flat` und byte-identisch zum
@@ -85,10 +90,19 @@ Faktor und glatte Interpolation nach dem Fragment-Shader.
 
 ### 4. Draw-Pfad (`draw_line.ts`)
 
-- Liest `line-width-start`/`line-width-end` (Zahlen, da `data-constant`).
-- Aktiv → `#define TAPER;`, übergibt `[start, end]` an die Uniform-Value-
-  Funktionen und `bucket.layoutTaperBuffer` als `dynamicLayoutBuffer3`.
+- Erkennt aktive Taper-Properties über `constantOr(-1) >= 0` bzw.
+  `!isConstant()` (daten-getriebene Ausdrücke gelten als aktiv).
+- Aktiv → `#define TAPER;` an `useProgram` und `bucket.layoutTaperBuffer` als
+  `dynamicLayoutBuffer3`. Die Start-/Endbreiten bindet der Paint-Binder
+  (Uniform oder Attribut) automatisch — `line_program.ts` bleibt unverändert.
 - Inaktiv → identischer Pfad wie vorher.
+
+### 5. Query / Hit-Testing (`line_style_layer.ts`)
+
+- `queryRadius` und `queryIntersectsFeature` berücksichtigen die maximale
+  Breite aus `line-width`, `line-width-start` und `line-width-end`
+  (`getMaxLineWidth`), damit getaperte Linien über ihre volle (dickste) Breite
+  anklickbar sind.
 
 ## Dateien (Änderungen)
 
@@ -119,11 +133,14 @@ Faktor und glatte Interpolation nach dem Fragment-Shader.
   nicht mit der verjüngten Breite.
 - `line-gap-width` wird nicht per-Vertex interpoliert (bleibt uniform); die
   äußere Kante (outset) verjüngt sich, die Gap bleibt konstant.
-- Query/Hit-Breite (`queryRadius`) nutzt weiterhin `line-width` als Näherung.
+- Query/Hit-Testing (`queryRadius`, `queryIntersectsFeature`) nutzt die
+  **maximale** Breite aus `line-width`, `line-width-start` und
+  `line-width-end` — ein exaktes Taper-Profil beim Klick ist damit nicht
+  möglich, aber die Linie ist über ihre volle dicke Breite anklickbar.
 - Der Faktor ist ein Geometrie-Merkmal des Buckets — er ändert sich nicht,
   wenn nur `line-width-start`/`end` nachträglich animiert werden (gewünscht,
-  da die Geometrie unverändert bleibt und die Breiten als Uniforms billig
-  variieren).
+  da die Geometrie unverändert bleibt und die Breiten als Uniforms/Attribute
+  billig variieren).
 
 ## Nutzung
 
@@ -141,3 +158,15 @@ map.addLayer({
   }
 });
 ```
+
+Beide Taper-Breiten sind `data-driven` — auch per Feature:
+
+```js
+paint: {
+  'line-width-start': ['get', 'width_at_start'],
+  'line-width-end': ['interpolate', ['linear'], ['zoom'],
+      0, 2,
+      20, 12]
+}
+```
+
