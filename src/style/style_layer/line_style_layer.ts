@@ -1,7 +1,8 @@
 import {type QueryIntersectsFeatureParams, StyleLayer} from '../style_layer.ts';
 import {LineBucket} from '../../data/bucket/line_bucket.ts';
-import {polygonIntersectsBufferedMultiLine} from '../../util/intersection_tests.ts';
+import {distToSegmentSquared, polygonIntersectsBufferedMultiLine, polygonIntersectsBufferedPoint} from '../../util/intersection_tests.ts';
 import {getMaximumPaintValue, translateDistance, translate, offsetLine} from '../query_utils.ts';
+import Point from '@mapbox/point-geometry';
 import properties, {type LineLayoutPropsPossiblyEvaluated, type LinePaintPropsPossiblyEvaluated} from './line_style_layer_properties.g.ts';
 import {extend} from '../../util/util.ts';
 import {EvaluationParameters} from '../evaluation_parameters.ts';
@@ -101,19 +102,31 @@ export class LineStyleLayer extends StyleLayer {
             this.paint.get('line-translate'),
             this.paint.get('line-translate-anchor'),
             -transform.bearingInRadians, pixelsToTileUnits);
-        const halfWidth = pixelsToTileUnits / 2 * getLineWidth(
-            Math.max(
-                this.paint.get('line-width').evaluate(feature, featureState),
-                this.paint.get('line-width-start').evaluate(feature, featureState),
-                this.paint.get('line-width-end').evaluate(feature, featureState)
-            ),
-            this.paint.get('line-gap-width').evaluate(feature, featureState));
+
         const lineOffset = this.paint.get('line-offset').evaluate(feature, featureState);
         if (lineOffset) {
             geometry = offsetLine(geometry, lineOffset * pixelsToTileUnits);
         }
 
-        return polygonIntersectsBufferedMultiLine(translatedPolygon, geometry, halfWidth);
+        const lineWidth = this.paint.get('line-width').evaluate(feature, featureState);
+        const lineWidthStart = this.paint.get('line-width-start').evaluate(feature, featureState);
+        const lineWidthEnd = this.paint.get('line-width-end').evaluate(feature, featureState);
+        const lineGapWidth = this.paint.get('line-gap-width').evaluate(feature, featureState);
+
+        // No taper for this feature: use the original constant-width path.
+        if (lineWidthStart < 0 && lineWidthEnd < 0) {
+            return polygonIntersectsBufferedMultiLine(translatedPolygon, geometry,
+                pixelsToTileUnits / 2 * getLineWidth(lineWidth, lineGapWidth));
+        }
+
+        // Tapered: the width varies linearly along each line between line-width-start
+        // and line-width-end (an unset side falls back to line-width), exactly like
+        // the vertex shader interpolates it. The hit test therefore uses a variable
+        // buffer radius instead of a constant maximum, so only the part of the line
+        // that is actually drawn is clickable.
+        const localHalfWidth = (t: number) =>
+            pixelsToTileUnits / 2 * getLineWidth(taperWidthAt(t, lineWidth, lineWidthStart, lineWidthEnd), lineGapWidth);
+        return polygonIntersectsBufferedTaperedLine(translatedPolygon, geometry, localHalfWidth, pixelsToTileUnits);
     }
 
     isTileClipped(): boolean {
@@ -127,6 +140,105 @@ function getLineWidth(lineWidth: number, lineGapWidth: number): number {
     } else {
         return lineWidth;
     }
+}
+
+/**
+ * The width of a tapered line at the normalized position `t` (0 = line start,
+ * 1 = line end), with the same fallback as the shader: an unset side
+ * (default -1) uses the regular `line-width`.
+ */
+function taperWidthAt(t: number, lineWidth: number, widthStart: number, widthEnd: number): number {
+    const start = widthStart >= 0 ? widthStart : lineWidth;
+    const end = widthEnd >= 0 ? widthEnd : lineWidth;
+    return start + (end - start) * t;
+}
+
+/**
+ * The total length of a line, and the cumulative distance along it at each
+ * vertex, used to compute the normalized taper position `t` for every point.
+ */
+function lineDistances(line: Point[]): {total: number; distances: number[]} {
+    const distances: number[] = [0];
+    let total = 0;
+    for (let i = 1; i < line.length; i++) {
+        total += line[i - 1].dist(line[i]);
+        distances.push(total);
+    }
+    return {total, distances};
+}
+
+/**
+ * Whether a query point lies within the variable buffer radius of a line,
+ * where the radius is `radiusAt(globalT)` with `globalT` the normalized
+ * distance along the line (0..1). Matches how the tapered line is drawn.
+ */
+function pointIntersectsBufferedTaperedLine(p: Point, line: Point[], radiusAt: (t: number) => number): boolean {
+    if (line.length === 1) {
+        const r = radiusAt(0);
+        return p.distSqr(line[0]) < r * r;
+    }
+    const {total, distances} = lineDistances(line);
+    if (total === 0) {
+        const r = radiusAt(0);
+        return p.distSqr(line[0]) < r * r;
+    }
+    for (let i = 1; i < line.length; i++) {
+        const v = line[i - 1];
+        const w = line[i];
+        const segmentLength = v.dist(w);
+        // Normalized position of the projection of p onto this segment (0..1).
+        let t = 0;
+        const l2 = v.distSqr(w);
+        if (l2 > 0) {
+            const projected = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+            t = Math.max(0, Math.min(1, projected));
+        }
+        const r = radiusAt((distances[i - 1] + segmentLength * t) / total);
+        if (distToSegmentSquared(p, v, w) < r * r) return true;
+    }
+    return false;
+}
+
+/**
+ * Whether a query polygon intersects a line drawn with a variable buffer radius.
+ * For a single-point query this is exact; for a polygon the line is densely
+ * sampled (bounded) and each sample disc is tested against the polygon.
+ */
+function polygonIntersectsBufferedTaperedLine(polygon: Point[], multiLine: Point[][], radiusAt: (t: number) => number, minStep: number): boolean {
+    if (polygon.length === 1) {
+        for (const line of multiLine) {
+            if (pointIntersectsBufferedTaperedLine(polygon[0], line, radiusAt)) return true;
+        }
+        return false;
+    }
+
+    for (const line of multiLine) {
+        if (line.length === 1) {
+            if (polygonIntersectsBufferedPoint(polygon, line[0], radiusAt(0))) return true;
+            continue;
+        }
+        const {total, distances} = lineDistances(line);
+        if (total === 0) {
+            if (polygonIntersectsBufferedPoint(polygon, line[0], radiusAt(0))) return true;
+            continue;
+        }
+        for (let i = 1; i < line.length; i++) {
+            const v = line[i - 1];
+            const w = line[i];
+            const segmentLength = v.dist(w);
+            // Sample often enough to follow both the line and the varying radius,
+            // bounded so degenerate geometry cannot create a huge sample count.
+            const maxR = Math.max(radiusAt(distances[i - 1] / total), radiusAt(distances[i] / total));
+            const samples = Math.min(Math.max(1, Math.ceil(segmentLength / Math.max(minStep, maxR * 0.5))), 64);
+            for (let j = 0; j <= samples; j++) {
+                const t = j / samples;
+                const point = new Point(v.x + (w.x - v.x) * t, v.y + (w.y - v.y) * t);
+                const globalT = (distances[i - 1] + segmentLength * t) / total;
+                if (polygonIntersectsBufferedPoint(polygon, point, radiusAt(globalT))) return true;
+            }
+        }
+    }
+    return false;
 }
 
 /**

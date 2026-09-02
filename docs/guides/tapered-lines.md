@@ -99,10 +99,19 @@ Faktor und glatte Interpolation nach dem Fragment-Shader.
 
 ### 5. Query / Hit-Testing (`line_style_layer.ts`)
 
-- `queryRadius` und `queryIntersectsFeature` berücksichtigen die maximale
-  Breite aus `line-width`, `line-width-start` und `line-width-end`
-  (`getMaxLineWidth`), damit getaperte Linien über ihre volle (dickste) Breite
-  anklickbar sind.
+- `queryRadius` nutzt die **maximale** Breite aus `line-width`, `line-width-start`
+  und `line-width-end` (`getMaxLineWidth`) — das ist nur der konservative
+  Vorfilter des Feature-Index (dessen BBox-Puffer eine konstante Breite
+  braucht).
+- `queryIntersectsFeature` macht den **exakten** Taper-Test: Die lokale Breite
+  variiert entlang der Linie wie im Shader (`mix` mit Fallback auf
+  `line-width`), und getestet wird gegen den variablen Radius:
+  - Punkt-Queries (Klick): exakt über Segment-Distanz + interpolierten Radius.
+  - Polygon-Queries: dichtes, gedeckeltes Sampling der Linie, jeder Sample
+    mit lokalem Radius gegen das Polygon.
+  - Ergebnis: **nur da, wo wirklich Linie gezeichnet ist, ist ein Hit** — am
+    dünnen Ende wird ein Punkt, den die Max-Breite noch getroffen hätte, nicht
+    mehr getroffen.
 
 ## Dateien (Änderungen)
 
@@ -133,10 +142,10 @@ Faktor und glatte Interpolation nach dem Fragment-Shader.
   nicht mit der verjüngten Breite.
 - `line-gap-width` wird nicht per-Vertex interpoliert (bleibt uniform); die
   äußere Kante (outset) verjüngt sich, die Gap bleibt konstant.
-- Query/Hit-Testing (`queryRadius`, `queryIntersectsFeature`) nutzt die
-  **maximale** Breite aus `line-width`, `line-width-start` und
-  `line-width-end` — ein exaktes Taper-Profil beim Klick ist damit nicht
-  möglich, aber die Linie ist über ihre volle dicke Breite anklickbar.
+- Query/Hit-Testing: `queryRadius` nutzt die **maximale** Breite (konservativer
+  BBox-Vorfilter des Feature-Index), `queryIntersectsFeature` den **exakten**
+  variablen Radius — die Linie ist also nur da anklickbar, wo sie wirklich
+  gezeichnet ist.
 - Der Faktor ist ein Geometrie-Merkmal des Buckets — er ändert sich nicht,
   wenn nur `line-width-start`/`end` nachträglich animiert werden (gewünscht,
   da die Geometrie unverändert bleibt und die Breiten als Uniforms/Attribute
