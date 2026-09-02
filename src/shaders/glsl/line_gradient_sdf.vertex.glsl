@@ -12,6 +12,11 @@
 
 layout(location = 0) in ivec2 a_pos_normal;
 layout(location = 1) in uvec4 a_data;
+#ifdef TAPER
+// Per-vertex line position (0 = start, 1 = end), bound from the line bucket's
+// taper buffer (see `line_taper_attributes.ts`).
+in float a_taper;
+#endif
 layout(location = 2) in float a_uv_x;
 layout(location = 3) in float a_split_index;
 
@@ -19,6 +24,10 @@ uniform vec2 u_translation;
 uniform mediump float u_ratio;
 uniform lowp float u_device_pixel_ratio;
 uniform vec2 u_units_to_pixels;
+#ifdef TAPER
+uniform lowp float u_width_start;
+uniform lowp float u_width_end;
+#endif
 uniform float u_image_height;
 uniform float u_tileratio;
 uniform float u_crossfade_from;
@@ -26,7 +35,11 @@ uniform float u_crossfade_to;
 uniform float u_lineatlas_height;
 
 out vec2 v_normal;
+#ifdef TAPER
+out vec2 v_width2;
+#else
 flat out vec2 v_width2;
+#endif
 out float v_gamma_scale;
 out highp vec2 v_uv;
 out vec2 v_tex_a;
@@ -81,6 +94,12 @@ void main() {
     mediump vec2 normal = vec2(a_pos_normal & 1);
     normal.y = normal.y * 2.0 - 1.0;
     v_normal = normal;
+
+#ifdef TAPER
+    // Interpolate the line width along the line. `a_taper` runs from 0 at the
+    // start to 1 at the end of each line.
+    width = mix(u_width_start, u_width_end, a_taper);
+#endif
 
     // these transformations used to be applied in the JS and native code bases.
     // moved them into the shader for clarity and simplicity.

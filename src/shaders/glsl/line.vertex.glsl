@@ -8,14 +8,31 @@
 
 layout(location = 0) in ivec2 a_pos_normal;
 layout(location = 1) in uvec4 a_data;
+#ifdef TAPER
+// Per-vertex line position (0 = start, 1 = end), bound from the line bucket's
+// taper buffer (see `line_taper_attributes.ts`). No explicit layout location is
+// assigned: it is linked after the data-driven paint attributes.
+in float a_taper;
+#endif
 
 uniform vec2 u_translation;
 uniform mediump float u_ratio;
 uniform vec2 u_units_to_pixels;
 uniform lowp float u_device_pixel_ratio;
+#ifdef TAPER
+// Tapered lines: the width varies along the line between `line-width-start`
+// and `line-width-end`. The two are uniform (per feature, as with `line-width`)
+// while `a_taper` (0 = start, 1 = end) varies per vertex.
+uniform lowp float u_width_start;
+uniform lowp float u_width_end;
+#endif
 
 out vec2 v_normal;
+#ifdef TAPER
+out vec2 v_width2;
+#else
 flat out vec2 v_width2;
+#endif
 out float v_gamma_scale;
 out highp float v_linesofar;
 #ifdef GLOBE
@@ -60,6 +77,13 @@ void main() {
     mediump vec2 normal = vec2(a_pos_normal & 1);
     normal.y = normal.y * 2.0 - 1.0;
     v_normal = normal;
+
+#ifdef TAPER
+    // Interpolate the line width along the line. `a_taper` runs from 0 at the
+    // start to 1 at the end of each line; a value below/above that range (from
+    // the duplicate vertices of caps and joins) is clamped by `mix`.
+    width = mix(u_width_start, u_width_end, a_taper);
+#endif
 
     // these transformations used to be applied in the JS and native code bases.
     // moved them into the shader for clarity and simplicity.

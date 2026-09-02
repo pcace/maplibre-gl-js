@@ -224,4 +224,70 @@ describe('LineBucket', () => {
 
         expect(bucket.isEmpty()).toBe(true);
     });
+
+    test('LineBucket does not build a taper buffer when taper properties are unset', () => {
+        const bucket = createLineBucket({id: 'test'});
+        bucket.addLine([
+            new Point(0, 0),
+            new Point(10, 10),
+            new Point(20, 10)
+        ], {type: 2, properties: {}} as BucketFeature, 'bevel', 'butt', undefined, undefined, undefined, noSubdivision);
+
+        expect(bucket.taperEnabled).toBe(false);
+        expect(bucket.layoutTaperArray).toHaveLength(0);
+    });
+
+    test('LineBucket builds a taper buffer with normalized position along the line', () => {
+        const bucket = createLineBucket({
+            id: 'test',
+            paint: {
+                'line-width-start': 10,
+                'line-width-end': 2
+            }
+        });
+
+        const line = {type: 2, properties: {}} as BucketFeature;
+        bucket.addLine([
+            new Point(0, 0),
+            new Point(10, 0),
+            new Point(20, 0)
+        ], line, 'bevel', 'butt', undefined, undefined, undefined, noSubdivision);
+
+        expect(bucket.taperEnabled).toBe(true);
+        // Every layout vertex gets a matching taper value.
+        expect(bucket.layoutTaperArray).toHaveLength(bucket.layoutVertexArray.length);
+
+        const taper = bucket.layoutTaperArray.float32.subarray(0, bucket.layoutTaperArray.length);
+        expect(taper[0]).toBe(0);       // line start
+        expect(taper[taper.length - 1]).toBe(1); // line end
+        for (let i = 1; i < taper.length; i++) {
+            expect(taper[i]).toBeGreaterThanOrEqual(taper[i - 1]); // monotonic
+        }
+        expect(taper[Math.floor(taper.length / 2)]).toBeCloseTo(0.5, 1);
+    });
+
+    test('LineBucket taper factor ignores linesofar wrap-around', () => {
+        const bucket = createLineBucket({
+            id: 'test',
+            paint: {
+                'line-width-start': 10,
+                'line-width-end': 2
+            }
+        });
+
+        // Long enough that the 15-bit `linesofar` would wrap around, but the taper
+        // factor must keep increasing monotonically.
+        const pts: Point[] = [];
+        for (let i = 0; i <= 200; i++) {
+            pts.push(new Point(i * 100, 0));
+        }
+        bucket.addLine(pts, {type: 2, properties: {}} as BucketFeature, 'bevel', 'butt', undefined, undefined, undefined, noSubdivision);
+
+        const taper = bucket.layoutTaperArray.float32.subarray(0, bucket.layoutTaperArray.length);
+        expect(taper).toHaveLength(bucket.layoutVertexArray.length);
+        for (let i = 1; i < taper.length; i++) {
+            expect(taper[i]).toBeGreaterThanOrEqual(taper[i - 1]);
+        }
+        expect(taper[taper.length - 1]).toBe(1);
+    });
 });

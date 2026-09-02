@@ -1,7 +1,8 @@
-import {LineLayoutArray, LineExtLayoutArray} from '../array_types.g.ts';
+import {LineLayoutArray, LineExtLayoutArray, LineTaperLayoutArray} from '../array_types.g.ts';
 import {GEOJSONVT_CLIP_END, GEOJSONVT_CLIP_START} from '@maplibre/geojson-vt';
 import {members as layoutAttributes} from './line_attributes.ts';
 import {members as layoutAttributesExt} from './line_attributes_ext.ts';
+import {members as taperAttributes} from './line_taper_attributes.ts';
 import {SegmentVector} from '../segment.ts';
 import {ProgramConfigurationSet} from '../program_configuration.ts';
 import {TriangleIndexArray} from '../array_types.g.ts';
@@ -113,6 +114,18 @@ export class LineBucket implements Bucket {
     layoutVertexArray2: LineExtLayoutArray;
     layoutVertexBuffer2: VertexBuffer;
 
+    // Per-vertex taper factors (0 = line start, 1 = line end), only populated when a
+    // layer sets `line-width-start` and/or `line-width-end`. Lives in its own buffer so
+    // non-tapered lines pay no extra memory or upload cost.
+    layoutTaperArray: LineTaperLayoutArray;
+    layoutTaperBuffer: VertexBuffer;
+    taperEnabled: boolean;
+    // Cumulative distance along the current line, reset per `addLine` (never reset by the
+    // `linesofar` wrap-around, so the taper factor stays monotonic on long lines).
+    taperDistance: number;
+    // Total length of the current line, used to normalize `taperDistance` into a 0..1 factor.
+    lineLength: number;
+
     indexArray: TriangleIndexArray;
     indexBuffer: IndexBuffer;
 
@@ -137,12 +150,25 @@ export class LineBucket implements Bucket {
 
         this.layoutVertexArray = new LineLayoutArray();
         this.layoutVertexArray2 = new LineExtLayoutArray();
+        this.layoutTaperArray = new LineTaperLayoutArray();
+        this.taperEnabled = false;
+        this.taperDistance = 0;
+        this.lineLength = 0;
         this.indexArray = new TriangleIndexArray();
         this.programConfigurations = new ProgramConfigurationSet(options.layers, options.zoom);
         this.segments = new SegmentVector();
         this.maxLineLength = 0;
 
         this.stateDependentLayerIds = this.layers.filter((l) => l.isStateDependent()).map((l) => l.id);
+
+        // Tapered lines: when a layer sets `line-width-start` and/or `line-width-end`
+        // (the property default of -1 means "not set"), each vertex stores its position
+        // along the line (0..1) in the taper buffer and the shader interpolates the width
+        // between the two values. Because the stored value is a pure geometry factor, the
+        // start/end widths themselves stay free to be zoom- and feature-driven uniforms.
+        this.taperEnabled = this.layers.some((layer) =>
+            layer.paint.get('line-width-start') >= 0 ||
+            layer.paint.get('line-width-end') >= 0);
     }
 
     populate(features: IndexedFeature[], options: PopulateParameters, canonical: CanonicalTileID): void {
@@ -232,6 +258,9 @@ export class LineBucket implements Bucket {
             if (this.layoutVertexArray2.length !== 0) {
                 this.layoutVertexBuffer2 = context.createVertexBuffer(this.layoutVertexArray2, layoutAttributesExt);
             }
+            if (this.layoutTaperArray.length !== 0) {
+                this.layoutTaperBuffer = context.createVertexBuffer(this.layoutTaperArray, taperAttributes);
+            }
             this.layoutVertexBuffer = context.createVertexBuffer(this.layoutVertexArray, layoutAttributes);
             this.indexBuffer = context.createIndexBuffer(this.indexArray);
         }
@@ -245,6 +274,9 @@ export class LineBucket implements Bucket {
         this.indexBuffer.destroy();
         this.programConfigurations.destroy();
         this.segments.destroy();
+        if (this.layoutTaperBuffer) {
+            this.layoutTaperBuffer.destroy();
+        }
     }
 
     lineFeatureClips(feature: BucketFeature): LineClips | undefined {
@@ -274,6 +306,8 @@ export class LineBucket implements Bucket {
         this.distance = 0;
         this.scaledDistance = 0;
         this.totalDistance = 0;
+        this.taperDistance = 0;
+        this.lineLength = 0;
 
         // First, subdivide the line if needed (mostly for globe rendering)
         const granularity = canonical ? subdivisionGranularity.line.getGranularityForZoomLevel(canonical.z) : 1;
@@ -303,6 +337,17 @@ export class LineBucket implements Bucket {
 
         // Ignore invalid geometry.
         if (len - first < (isPolygon ? 3 : 2)) return;
+
+        // Total length of the polyline about to be emitted. Used to normalize each
+        // vertex's position along the line into a 0..1 taper factor. Only computed when
+        // a layer actually uses tapered lines.
+        if (this.taperEnabled) {
+            let length = 0;
+            for (let i = first; i < len - 1; i++) {
+                length += vertices[i].dist(vertices[i + 1]);
+            }
+            this.lineLength = length;
+        }
 
         if (join === 'bevel') miterLimit = 1.05;
 
@@ -553,6 +598,15 @@ export class LineBucket implements Bucket {
         // scale down so that we can store longer distances while sacrificing precision.
         const linesofarScaled = totalDistance * LINE_DISTANCE_SCALE;
 
+        // Tapered lines: store this vertex's normalized position along the line so the
+        // shader can interpolate the width between `line-width-start`/`line-width-end`.
+        // `taperDistance` is intentionally used (not `distance`, which may wrap around for
+        // very long un-clipped lines) so the factor stays monotonic 0..1.
+        if (this.taperEnabled) {
+            const taper = this.lineLength > 0 ? Math.min(this.taperDistance / this.lineLength, 1) : 0;
+            this.layoutTaperArray.emplaceBack(taper);
+        }
+
         this.layoutVertexArray.emplaceBack(
             // a_pos_normal
             // Encode round/up the least significant bits
@@ -601,6 +655,7 @@ export class LineBucket implements Bucket {
 
     updateDistance(prev: Point, next: Point): void {
         this.distance += prev.dist(next);
+        this.taperDistance += prev.dist(next);
         this.updateScaledDistance();
     }
 
