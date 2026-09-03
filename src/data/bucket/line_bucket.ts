@@ -726,8 +726,7 @@ export class LineBucket implements Bucket {
             }
             this.layoutTaperArray.emplaceBack(value);
         }
-
-        this.layoutVertexArray.emplaceBack(
+            this.layoutVertexArray.emplaceBack(
             // a_pos_normal
             // Encode round/up the least significant bits
             (x << 1) + (round ? 1 : 0),
