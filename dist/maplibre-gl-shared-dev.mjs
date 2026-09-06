@@ -22129,7 +22129,7 @@ function annotateGeoJSONTileFeature(feature, canonical, registry) {
 	const info = registry.get(feature.tags);
 	if (!info) return;
 	const pieceLines = extractPieceLines(feature);
-	if (!pieceLines || pieceLines.length > info.rings.length) return;
+	if (!pieceLines || pieceLines.length === 0) return;
 	const pieceKnots = [];
 	for (const line of pieceLines) {
 		const ring = findMatchingRing(line, info.rings, canonical);
@@ -22207,15 +22207,145 @@ function findMatchingRing(line, rings, canonical) {
 */
 function projectPieceLineOntoRing(line, ring, canonical) {
 	const knots = new Array(line.length);
-	let searchFrom = 0;
-	for (let i = 0; i < line.length; i++) {
-		const [wx, wy] = pieceVertexToWorld(line[i], canonical);
-		const projection = projectOntoRing(wx, wy, ring, searchFrom);
-		searchFrom = projection.segment;
-		knots[i] = ring.length > 0 ? Math.min(Math.max(projection.arc / ring.length, 0), 1) : 0;
-		if (i > 0 && knots[i] < knots[i - 1]) knots[i] = knots[i - 1];
+	const quant = 1 / (EXTENT$1 * (1 << canonical.z));
+	const world = line.map((v) => pieceVertexToWorld(v, canonical));
+	const walkFrom = (seg, arc0, from) => {
+		let searchFrom = seg;
+		let prevArc = arc0;
+		let prevX = world[from - 1][0];
+		let prevY = world[from - 1][1];
+		const arcs = [];
+		let score = 0;
+		for (let i = from; i < line.length; i++) {
+			const [wx, wy] = world[i];
+			const chord = Math.hypot(wx - prevX, wy - prevY);
+			const hit = projectOntoRingWindowed(wx, wy, ring, searchFrom, prevArc + chord, quant * 8);
+			if (!hit) return null;
+			score += hit.residual;
+			arcs.push(hit.arc);
+			searchFrom = hit.segment;
+			prevArc = hit.arc;
+			prevX = wx;
+			prevY = wy;
+		}
+		return {
+			arcs,
+			score
+		};
+	};
+	const candidates = projectOntoRingCandidates(world[0][0], world[0][1], ring, 0, quant * quant * 4);
+	let chosen = candidates[0];
+	if (candidates.length > 1 && line.length > 1) {
+		let bestScore = Infinity;
+		for (const c of candidates) {
+			const w = walkFrom(c.segment, c.arc, 1);
+			const score = w ? w.score + c.residual : Infinity;
+			if (score < bestScore || score === bestScore && c.arc > chosen.arc) {
+				bestScore = score;
+				chosen = c;
+			}
+		}
+	}
+	let searchFrom = chosen.segment;
+	let prevArc = chosen.arc;
+	let prevX = world[0][0];
+	let prevY = world[0][1];
+	knots[0] = ring.length > 0 ? Math.min(Math.max(chosen.arc / ring.length, 0), 1) : 0;
+	for (let i = 1; i < line.length; i++) {
+		const [wx, wy] = world[i];
+		const chord = Math.hypot(wx - prevX, wy - prevY);
+		const expected = prevArc + chord;
+		let hit = projectOntoRingWindowed(wx, wy, ring, searchFrom, expected, quant * 8);
+		if (!hit) hit = projectOntoRing(wx, wy, ring, searchFrom);
+		searchFrom = hit.segment;
+		prevArc = hit.arc;
+		prevX = wx;
+		prevY = wy;
+		knots[i] = ring.length > 0 ? Math.min(Math.max(hit.arc / ring.length, 0), 1) : 0;
+		if (knots[i] < knots[i - 1]) knots[i] = knots[i - 1];
 	}
 	return knots;
+}
+/**
+* Globale Projektion (alter Scan), liefert ALLE Near-Tie-Kandidaten
+* (residual ≤ best + thresh) aufsteigend nach Arc — für die Anker-Disambiguierung
+* bei selbstüberlappenden Linien, wo der Residual allein die Stränge nicht
+* unterscheiden kann.
+*/
+function projectOntoRingCandidates(x, y, ring, searchFrom, thresh) {
+	const xs = ring.xs;
+	const ys = ring.ys;
+	const cum = ring.cum;
+	let best = Infinity;
+	const cands = [];
+	for (let j = Math.max(0, searchFrom); j < xs.length - 1; j++) {
+		const ax = xs[j];
+		const ay = ys[j];
+		const dx = xs[j + 1] - ax;
+		const dy = ys[j + 1] - ay;
+		const l2 = dx * dx + dy * dy;
+		const xHere = x + (l2 > 0 ? Math.round(ax - x) : 0);
+		let t = l2 > 0 ? ((xHere - ax) * dx + (y - ay) * dy) / l2 : 0;
+		t = Math.max(0, Math.min(1, t));
+		const px = ax + dx * t;
+		const py = ay + dy * t;
+		const residual = (xHere - px) * (xHere - px) + (y - py) * (y - py);
+		if (residual > best + thresh) continue;
+		if (residual < best) best = residual;
+		cands.push({
+			arc: cum[j] + (cum[j + 1] - cum[j]) * t,
+			residual,
+			segment: j
+		});
+		for (let k = cands.length - 1; k >= 0; k--) if (cands[k].residual > best + thresh) cands.splice(k, 1);
+		if (cands.length > 8) cands.shift();
+	}
+	const kept = cands.filter((c) => c.residual <= best + thresh);
+	kept.sort((a, b) => a.arc - b.arc);
+	return kept;
+}
+/**
+* Wie `projectOntoRing`, aber der Scan wird auf ein enges Arc-Fenster um
+* `expected` (± tol) begrenzt. Begründung siehe projectPieceLineOntoRing:
+* bei selbstüberlappenden Linien gewinnt sonst ein SPÄTERER (oder früherer)
+* Ring-Strang mit Residual 0 gegen den eigenen, quantisierten Vertex — die
+* Breiten wandern auf den falschen Bogenabschnitt. Liefert `null`, wenn im
+* Fenster kein Segment liegt (Aufrufer fällt dann auf den globalen Scan
+* zurück — identisch zum Verhalten vor diesem Fix).
+*/
+function projectOntoRingWindowed(x, y, ring, searchFrom, expected, tol) {
+	const xs = ring.xs;
+	const ys = ring.ys;
+	const cum = ring.cum;
+	const lo = expected - tol;
+	const hi = expected + tol;
+	let best = null;
+	for (let j = Math.max(0, searchFrom); j < xs.length - 1; j++) {
+		if (cum[j] > hi) break;
+		const arcEnd = cum[j + 1];
+		const ax = xs[j];
+		const ay = ys[j];
+		const dx = xs[j + 1] - ax;
+		const dy = ys[j + 1] - ay;
+		const l2 = dx * dx + dy * dy;
+		const xHere = x + (l2 > 0 ? Math.round(ax - x) : 0);
+		let t = l2 > 0 ? ((xHere - ax) * dx + (y - ay) * dy) / l2 : 0;
+		t = Math.max(0, Math.min(1, t));
+		const px = ax + dx * t;
+		const py = ay + dy * t;
+		const residual = (xHere - px) * (xHere - px) + (y - py) * (y - py);
+		if (arcEnd < lo) continue;
+		if (!best || residual < best.residual) {
+			const arc = cum[j] + (cum[j + 1] - cum[j]) * t;
+			if (arc >= lo && arc <= hi && (!best || residual < best.residual)) best = {
+				arc,
+				residual,
+				segment: j
+			};
+			if (residual < RESIDUAL_EPSILON) break;
+		}
+	}
+	return best;
 }
 const RESIDUAL_EPSILON = 1e-18;
 function projectOntoRing(x, y, ring, searchFrom) {

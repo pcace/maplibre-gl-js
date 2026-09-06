@@ -2028,18 +2028,6 @@ declare class Uniform1i extends Uniform<number> {
   constructor(context: Context, location: WebGLUniformLocation);
   set(v: number): void;
 }
-declare class Uniform1f extends Uniform<number> {
-  constructor(context: Context, location: WebGLUniformLocation);
-  set(v: number): void;
-}
-declare class Uniform4f extends Uniform<vec4> {
-  constructor(context: Context, location: WebGLUniformLocation);
-  set(v: vec4): void;
-}
-declare class UniformMatrix4f extends Uniform<mat4> {
-  constructor(context: Context, location: WebGLUniformLocation);
-  set(v: mat4): void;
-}
 /**
  * @internal
  * A uniform bindings
@@ -2489,7 +2477,7 @@ declare class ImageManager extends Evented<ImageManagerEventType> {
 //#endregion
 //#region src/webgl/texture.d.ts
 type TextureFormat = WebGLRenderingContextBase["RGBA"] | WebGLRenderingContextBase["ALPHA"];
-type TextureFilter = WebGLRenderingContextBase["LINEAR"] | WebGLRenderingContextBase["LINEAR_MIPMAP_NEAREST"] | WebGLRenderingContextBase["NEAREST"];
+type TextureFilter = WebGLRenderingContextBase["LINEAR"] | WebGLRenderingContextBase["LINEAR_MIPMAP_NEAREST"] | WebGLRenderingContextBase["LINEAR_MIPMAP_LINEAR"] | WebGLRenderingContextBase["NEAREST"];
 type TextureWrap = WebGLRenderingContextBase["REPEAT"] | WebGLRenderingContextBase["CLAMP_TO_EDGE"] | WebGLRenderingContextBase["MIRRORED_REPEAT"];
 type EmptyImage = {
   width: number;
@@ -2507,7 +2495,8 @@ declare class Texture {
   size: [number, number];
   texture: WebGLTexture;
   format: TextureFormat;
-  filter: TextureFilter;
+  magFilter: TextureFilter;
+  minFilter: TextureFilter;
   wrap: TextureWrap;
   useMipmap: boolean;
   /** Tracks the original handle to detect corruption after context loss (#2811) */
@@ -2527,7 +2516,12 @@ declare class Texture {
   private _uploadRawData;
   private _updateDomImage;
   private _updateRawData;
-  bind(filter: TextureFilter, wrap: TextureWrap, minFilter?: TextureFilter | null): void;
+  bind(magFilter: TextureFilter, wrap: TextureWrap, minFilter?: TextureFilter | null): void;
+  /**
+   * Builds the mip chain after the texture was drawn into as a framebuffer attachment.
+   * An allocation without pixels (`data: null`) gets no chain from `update`, so a render target is built once, here, after the draw.
+   */
+  generateMipmap(): void;
   destroy(): void;
 }
 //#endregion
@@ -2798,6 +2792,13 @@ type PopulateParameters = {
   availableImages: string[];
   subdivisionGranularity: SubdivisionGranularitySetting;
 };
+type BucketDependencyParameters = {
+  options: PopulateParameters;
+  canonical: CanonicalTileID;
+  imagePositions: Record<string, ImagePosition>;
+  dashPositions: Record<string, DashEntry>;
+  imageMap: GetImagesResponse;
+};
 type IndexedFeature = {
   feature: VectorTileFeatureLike;
   id: number | string;
@@ -2856,6 +2857,7 @@ interface Bucket {
   readonly stateDependentLayers: any[];
   readonly stateDependentLayerIds: string[];
   populate(features: IndexedFeature[], options: PopulateParameters, canonical: CanonicalTileID): void;
+  addFeatures(parameters: BucketDependencyParameters): void;
   update(states: FeatureStates, vtLayer: VectorTileLayerLike, imagePositions: {
     [_: string]: ImagePosition;
   }, dashPositions: Record<string, DashEntry>): void;
@@ -3161,6 +3163,7 @@ declare class CircleBucket<Layer extends CircleStyleLayer | HeatmapStyleLayer> i
   update(states: FeatureStates, vtLayer: VectorTileLayerLike, imagePositions: {
     [_: string]: ImagePosition;
   }): void;
+  addFeatures(_parameters: BucketDependencyParameters): void;
   isEmpty(): boolean;
   uploadPending(): boolean;
   upload(context: Context): void;
@@ -3235,6 +3238,7 @@ declare class FillBucket implements Bucket {
   indexArray2: LineIndexArray;
   indexBuffer2: IndexBuffer;
   hasDependencies: boolean;
+  sdfPatterns: Record<string, boolean>;
   programConfigurations: ProgramConfigurationSet<FillStyleLayer>;
   segments: SegmentVector;
   segments2: SegmentVector;
@@ -3244,9 +3248,9 @@ declare class FillBucket implements Bucket {
   update(states: FeatureStates, vtLayer: VectorTileLayerLike, imagePositions: {
     [_: string]: ImagePosition;
   }): void;
-  addFeatures(options: PopulateParameters, canonical: CanonicalTileID, imagePositions: {
-    [_: string]: ImagePosition;
-  }): void;
+  addFeatures({ options, canonical, imagePositions, imageMap }: BucketDependencyParameters): void;
+  private detectSdfPatterns;
+  private recordSdfPattern;
   isEmpty(): boolean;
   uploadPending(): boolean;
   upload(context: Context): void;
@@ -3321,9 +3325,7 @@ declare class FillExtrusionBucket implements Bucket {
   features: BucketFeature[];
   constructor(options: BucketParameters<FillExtrusionStyleLayer>);
   populate(features: IndexedFeature[], options: PopulateParameters, canonical: CanonicalTileID): void;
-  addFeatures(options: PopulateParameters, canonical: CanonicalTileID, imagePositions: {
-    [_: string]: ImagePosition;
-  }): void;
+  addFeatures({ options, canonical, imagePositions }: BucketDependencyParameters): void;
   update(states: FeatureStates, vtLayer: VectorTileLayerLike, imagePositions: {
     [_: string]: ImagePosition;
   }): void;
@@ -3542,11 +3544,7 @@ declare class LineBucket implements Bucket {
   }, dashPositions: {
     [_: string]: DashEntry;
   }): void;
-  addFeatures(options: PopulateParameters, canonical: CanonicalTileID, imagePositions: {
-    [_: string]: ImagePosition;
-  }, dashPositions?: {
-    [_: string]: DashEntry;
-  }): void;
+  addFeatures({ options, canonical, imagePositions, dashPositions }: BucketDependencyParameters): void;
   isEmpty(): boolean;
   uploadPending(): boolean;
   upload(context: Context): void;
@@ -3890,6 +3888,7 @@ declare class SymbolBucket implements Bucket {
   update(states: FeatureStates, vtLayer: VectorTileLayerLike, imagePositions: {
     [_: string]: ImagePosition;
   }): void;
+  addFeatures(_parameters: BucketDependencyParameters): void;
   isEmpty(): boolean;
   uploadPending(): boolean;
   upload(context: Context): void;
@@ -4293,10 +4292,6 @@ declare class Sky extends Evented {
 type TerrainPreludeUniformsType = {
   "u_depth": Uniform1i;
   "u_terrain": Uniform1i;
-  "u_terrain_dim": Uniform1f;
-  "u_terrain_matrix": UniformMatrix4f;
-  "u_terrain_unpack": Uniform4f;
-  "u_terrain_exaggeration": Uniform1f;
 };
 //#endregion
 //#region src/geo/edge_insets.d.ts
@@ -5941,16 +5936,6 @@ declare class Terrain {
   _buildSkirts(vertexArray: Pos3dArray, indexArray: TriangleIndexArray, meshSize: number, delta: number, northPole: boolean, southPole: boolean): void;
 }
 //#endregion
-//#region src/webgl/program/projection_program.d.ts
-type ProjectionPreludeUniformsType = {
-  "u_projection_matrix": UniformMatrix4f;
-  "u_projection_tile_mercator_coords": Uniform4f;
-  "u_projection_clipping_plane": Uniform4f;
-  "u_projection_transition": Uniform1f;
-  "u_projection_fallback_matrix": UniformMatrix4f;
-  "u_projection_clip_antimeridian": Uniform1i;
-};
-//#endregion
 //#region src/webgl/program.d.ts
 type DrawMode = WebGLRenderingContextBase["LINES"] | WebGLRenderingContextBase["TRIANGLES"] | WebGL2RenderingContext["LINE_STRIP"];
 type ProgramAttribute = {
@@ -5969,7 +5954,6 @@ declare class Program<Us extends UniformBindings> {
   numAttributes: number;
   fixedUniforms: Us;
   terrainUniforms: TerrainPreludeUniformsType;
-  projectionUniforms: ProjectionPreludeUniformsType;
   binderUniforms: BinderUniform[];
   failedToCreate: boolean;
   constructor(context: Context, source: PreparedShader, configuration: ProgramConfiguration, fixedUniforms: (b: Context, a: UniformLocations) => Us, showOverdrawInspector: boolean, useTerrain: boolean, projectionPrelude: PreparedShader, projectionDefine: string, extraDefines?: string[]);
@@ -6006,6 +5990,33 @@ declare class VertexBuffer {
   /**
    * Destroy the GL buffer bound to the given WebGL context
    */
+  destroy(): void;
+}
+//#endregion
+//#region src/webgl/uniform_buffer.d.ts
+type Std140Layout = {
+  offsets: Record<string, number>;
+  contentWords: number;
+  sizeWords: number;
+};
+/**
+ * @internal
+ * The buffer behind one std140 uniform block, bound to a fixed binding point. Callers write members into
+ * `pending` at the layout's offsets and call `upload`, which skips the GPU write when nothing changed.
+ */
+declare class UniformBuffer {
+  context: Context;
+  buffer: WebGLBuffer;
+  binding: number;
+  contentWords: number;
+  uploaded: Float32Array;
+  pending: Float32Array;
+  uploadedWords: Uint32Array;
+  pendingWords: Uint32Array;
+  hasData: boolean;
+  bindingDirty: boolean;
+  constructor(context: Context, binding: number, layout: Std140Layout);
+  upload(): void;
   destroy(): void;
 }
 //#endregion
@@ -6054,6 +6065,9 @@ declare class Context {
   pixelStoreUnpack: PixelStoreUnpack;
   pixelStoreUnpackPremultiplyAlpha: PixelStoreUnpackPremultiplyAlpha;
   pixelStoreUnpackFlipY: PixelStoreUnpackFlipY;
+  projectionUniformBuffer: UniformBuffer;
+  terrainUniformBuffer: UniformBuffer;
+  frameUniformBuffer: UniformBuffer;
   extTextureFilterAnisotropic: EXT_texture_filter_anisotropic | null;
   extTextureFilterAnisotropicMax?: GLfloat;
   constructor(gl: WebGL2RenderingContext);
@@ -6125,8 +6139,8 @@ declare class DEMData {
   /**
 	* Constructs a `DEMData` object
 	* @param uid - the tile's unique id
-	* @param data - RGBAImage data has uniform 1px padding on all sides: square tile edge size defines stride
-	// and dim is calculated as stride - 2.
+	* @param data - RGBAImage data has uniform 2px padding on all sides: square tile edge size defines stride
+	// and dim is calculated as stride - 4.
 	* @param encoding - the encoding type of the data
 	* @param redFactor - the red channel factor used to unpack the data, used for `custom` encoding only
 	* @param greenFactor - the green channel factor used to unpack the data, used for `custom` encoding only
@@ -6681,6 +6695,128 @@ declare class CrossTileSymbolIndex {
   addLayer(styleLayer: StyleLayer, tiles: Tile[], lng: number): boolean;
   pruneUnusedLayers(usedLayers: string[]): void;
 }
+//#endregion
+//#region src/geo/projection/projection.d.ts
+/**
+ * Custom projections are handled both by a class which implements this `Projection` interface,
+ * and a class that is derived from the `Transform` base class. What is the difference?
+ *
+ * The transform-derived class:
+ * - should do all the heavy lifting for the projection - implement all the `project*` and `unproject*` functions, etc.
+ * - must store the map's state - center, pitch, etc. - this is handled in the `Transform` base class
+ * - must be cloneable - it should not create any heavy resources
+ *
+ * The projection-implementing class:
+ * - must provide basic information and data about the projection, which is *independent of the map's state* - name, shader functions, subdivision settings, etc.
+ * - must be a "singleton" - no matter how many copies of the matching Transform class exist, the Projection should always exist as a single instance (per Map)
+ * - may create heavy resources that should not exist in multiple copies (projection is never cloned) - for example, see the GPU inaccuracy mitigation for globe projection
+ * - must be explicitly disposed of after usage using the `destroy` function - this allows the implementing class to free any allocated resources
+ */
+/**
+ * @internal
+ * Specifies the usage for a square tile mesh:
+ * - 'stencil' for drawing stencil masks
+ * - 'raster' for drawing raster tiles, hillshade, etc.
+ */
+type TileMeshUsage = "stencil" | "raster";
+/**
+ * An interface the implementations of which are used internally by MapLibre to handle different projections.
+ */
+interface Projection {
+  /**
+   * @internal
+   * A short, descriptive name of this projection, such as 'mercator' or 'globe'.
+   */
+  get name(): ProjectionSpecification["type"];
+  /**
+   * @internal
+   * True if this projection needs to render subdivided geometry.
+   * Optimized rendering paths for non-subdivided geometry might be used throughout MapLibre.
+   * The value of this property may change during runtime, for example in globe projection depending on zoom.
+   */
+  get useSubdivision(): boolean;
+  /**
+   * Name of the shader projection variant that should be used for this projection.
+   * Note that this value may change dynamically, for example when globe projection internally transitions to mercator.
+   * Then globe projection might start reporting the mercator shader variant name to make MapLibre use faster mercator shaders.
+   */
+  get shaderVariantName(): string;
+  /**
+   * A `#define` macro that is injected into every MapLibre shader that uses this projection.
+   * @example
+   * `const define = projection.shaderDefine; // '#define GLOBE'`
+   */
+  get shaderDefine(): string;
+  /**
+   * @internal
+   * A preprocessed prelude code for both vertex and fragment shaders.
+   */
+  get shaderPreludeCode(): PreparedShader;
+  /**
+   * Vertex shader code that is injected into every MapLibre vertex shader that uses this projection.
+   */
+  get vertexShaderPreludeCode(): string;
+  /**
+   * @internal
+   * An object describing how much subdivision should be applied to rendered geometry.
+   * The subdivision settings should be a constant for a given projection.
+   * Projections that do not require subdivision should return {@link SubdivisionGranularitySetting.noSubdivision}.
+   */
+  get subdivisionGranularity(): SubdivisionGranularitySetting;
+  /**
+   * @internal
+   * A number representing the current transition state of the projection.
+   * The return value should be a number between 0 and 1,
+   * where 0 means the projection is fully in the initial state,
+   * and 1 means the projection is fully in the final state.
+   */
+  get transitionState(): number;
+  /**
+   * @internal
+   * Cleans up any resources the projection created, especially GPU buffers.
+   */
+  destroy(): void;
+  /**
+   * @internal
+   * Returns a subdivided mesh for a given tile ID, covering 0..EXTENT range.
+   * @param context - WebGL context.
+   * @param tileID - The tile coordinates for which to return a mesh. Meshes for tiles that border the top/bottom mercator edge might include extra geometry for the north/south pole.
+   * @param hasBorder - When true, the mesh will also include a small border beyond the 0..EXTENT range.
+   * @param allowPoles - When true, the mesh will also include geometry to cover the north (south) pole, if the given tileID borders the mercator range's top (bottom) edge.
+   * @param usage - Specify the usage of the tile mesh, as different usages might use different levels of subdivision.
+   */
+  getMeshFromTileID(context: Context, tileID: CanonicalTileID, hasBorder: boolean, allowPoles: boolean, usage: TileMeshUsage): Mesh;
+  /**
+   * @internal
+   * Recalculates the projection state based on the current evaluation parameters.
+   * @param params - Evaluation parameters.
+   */
+  recalculate(params: EvaluationParameters): void;
+  /**
+   * @internal
+   * Returns true if the projection is currently transitioning between two states.
+   */
+  hasTransition(): boolean;
+}
+//#endregion
+//#region src/render/render_options.d.ts
+type RenderPass = "offscreen" | "opaque" | "translucent";
+/**
+ * @internal
+ * Shared draw state, created per render and updated as rendering proceeds.
+ * Corresponds to part of MapLibre Native's `PaintParameters`.
+ */
+type RenderOptions = {
+  currentPass: RenderPass;
+  currentLayer: number;
+  opaquePassCutoff: number;
+  depthRangeFor3D: DepthRangeType;
+  isRenderingToTexture: boolean;
+  readonly transform: IReadonlyTransform;
+  readonly terrain: Terrain | null;
+  readonly projectionTransition: number;
+  readonly isRenderingGlobe: boolean;
+};
 //#endregion
 //#region src/style/style_layer/overlap_mode.d.ts
 /**
@@ -7642,13 +7778,16 @@ declare class GlyphManager {
  * The painter uses this interface — concrete implementations live in backend folders (webgl/, webgpu/).
  */
 interface IRenderToTexture {
+  /**
+   * Whether the render loop needs a follow-up frame to refresh cached textures retained while zooming.
+   */
+  needsFollowUpFrame: boolean;
   prepareForRender(style: Style, zoom: number): void;
   renderLayer(layer: StyleLayer, renderOptions: RenderOptions): boolean;
   getTexture(tile: Tile): any;
 }
 //#endregion
 //#region src/render/painter.d.ts
-type RenderPass = "offscreen" | "opaque" | "translucent";
 type PainterOptions = {
   showOverdrawInspector: boolean;
   showTileBoundaries: boolean;
@@ -7658,10 +7797,6 @@ type PainterOptions = {
   moving: boolean;
   fadeDuration: number;
   anisotropicFilterPitch: number;
-};
-type RenderOptions = {
-  isRenderingToTexture: boolean;
-  isRenderingGlobe: boolean;
 };
 /**
  * Holds the texture used to render a 2D tile so it can be draped over 3D
@@ -7736,10 +7871,7 @@ declare class Painter {
   imageManager: ImageManager;
   patternAtlas: PatternAtlas;
   glyphManager: GlyphManager;
-  depthRangeFor3D: DepthRangeType;
-  opaquePassCutoff: number;
-  renderPass: RenderPass;
-  currentLayer: number;
+  renderOptions: RenderOptions;
   currentStencilSource: string;
   nextStencilID: number;
   id: string;
@@ -8010,6 +8142,29 @@ type QueryRenderedFeaturesResultsItem = QueryResultsItem & {
   feature: MapGeoJSONFeature;
 };
 //#endregion
+//#region src/webgl/rtt_fingerprint.d.ts
+/**
+ * Immutable value describing the state a render-to-texture tile's textures
+ * were rendered from: the source tiles drawn into them, the source data
+ * revision, and the map zoom at render time (zoom-dependent style properties
+ * are evaluated then).
+ *
+ * @internal
+ */
+declare class RTTFingerprint {
+  private readonly _tileKeys;
+  private readonly _revision;
+  private readonly _zoom;
+  constructor(coords: OverscaledTileID[], revision: number, zoom: number);
+  equals(other: RTTFingerprint | undefined): boolean;
+  /**
+   * Returns whether the source tiles and revision match, without comparing zoom.
+   * Used to keep a texture on screen while the zoom is still changing and only
+   * re-render it once the zoom has settled.
+   */
+  equalsIgnoringZoom(other: RTTFingerprint | undefined): boolean;
+}
+//#endregion
 //#region src/tile/tile.d.ts
 /**
  * The tile's state, can be:
@@ -8114,9 +8269,7 @@ declare class Tile {
    * changes.
    */
   rttObjects: Array<RTTObject | undefined>;
-  rttFingerprint: {
-    [sourceId: string]: string;
-  };
+  rttFingerprint: Record<string, RTTFingerprint>;
   featureStateRevision: number;
   /**
    * @param tileID - the tile ID
@@ -9462,109 +9615,6 @@ declare class PauseablePlacement {
     [_: string]: Tile[];
   }): void;
   commit(now: number): Placement;
-}
-//#endregion
-//#region src/geo/projection/projection.d.ts
-/**
- * Custom projections are handled both by a class which implements this `Projection` interface,
- * and a class that is derived from the `Transform` base class. What is the difference?
- *
- * The transform-derived class:
- * - should do all the heavy lifting for the projection - implement all the `project*` and `unproject*` functions, etc.
- * - must store the map's state - center, pitch, etc. - this is handled in the `Transform` base class
- * - must be cloneable - it should not create any heavy resources
- *
- * The projection-implementing class:
- * - must provide basic information and data about the projection, which is *independent of the map's state* - name, shader functions, subdivision settings, etc.
- * - must be a "singleton" - no matter how many copies of the matching Transform class exist, the Projection should always exist as a single instance (per Map)
- * - may create heavy resources that should not exist in multiple copies (projection is never cloned) - for example, see the GPU inaccuracy mitigation for globe projection
- * - must be explicitly disposed of after usage using the `destroy` function - this allows the implementing class to free any allocated resources
- */
-/**
- * @internal
- * Specifies the usage for a square tile mesh:
- * - 'stencil' for drawing stencil masks
- * - 'raster' for drawing raster tiles, hillshade, etc.
- */
-type TileMeshUsage = "stencil" | "raster";
-/**
- * An interface the implementations of which are used internally by MapLibre to handle different projections.
- */
-interface Projection {
-  /**
-   * @internal
-   * A short, descriptive name of this projection, such as 'mercator' or 'globe'.
-   */
-  get name(): ProjectionSpecification["type"];
-  /**
-   * @internal
-   * True if this projection needs to render subdivided geometry.
-   * Optimized rendering paths for non-subdivided geometry might be used throughout MapLibre.
-   * The value of this property may change during runtime, for example in globe projection depending on zoom.
-   */
-  get useSubdivision(): boolean;
-  /**
-   * Name of the shader projection variant that should be used for this projection.
-   * Note that this value may change dynamically, for example when globe projection internally transitions to mercator.
-   * Then globe projection might start reporting the mercator shader variant name to make MapLibre use faster mercator shaders.
-   */
-  get shaderVariantName(): string;
-  /**
-   * A `#define` macro that is injected into every MapLibre shader that uses this projection.
-   * @example
-   * `const define = projection.shaderDefine; // '#define GLOBE'`
-   */
-  get shaderDefine(): string;
-  /**
-   * @internal
-   * A preprocessed prelude code for both vertex and fragment shaders.
-   */
-  get shaderPreludeCode(): PreparedShader;
-  /**
-   * Vertex shader code that is injected into every MapLibre vertex shader that uses this projection.
-   */
-  get vertexShaderPreludeCode(): string;
-  /**
-   * @internal
-   * An object describing how much subdivision should be applied to rendered geometry.
-   * The subdivision settings should be a constant for a given projection.
-   * Projections that do not require subdivision should return {@link SubdivisionGranularitySetting.noSubdivision}.
-   */
-  get subdivisionGranularity(): SubdivisionGranularitySetting;
-  /**
-   * @internal
-   * A number representing the current transition state of the projection.
-   * The return value should be a number between 0 and 1,
-   * where 0 means the projection is fully in the initial state,
-   * and 1 means the projection is fully in the final state.
-   */
-  get transitionState(): number;
-  /**
-   * @internal
-   * Cleans up any resources the projection created, especially GPU buffers.
-   */
-  destroy(): void;
-  /**
-   * @internal
-   * Returns a subdivided mesh for a given tile ID, covering 0..EXTENT range.
-   * @param context - WebGL context.
-   * @param tileID - The tile coordinates for which to return a mesh. Meshes for tiles that border the top/bottom mercator edge might include extra geometry for the north/south pole.
-   * @param hasBorder - When true, the mesh will also include a small border beyond the 0..EXTENT range.
-   * @param allowPoles - When true, the mesh will also include geometry to cover the north (south) pole, if the given tileID borders the mercator range's top (bottom) edge.
-   * @param usage - Specify the usage of the tile mesh, as different usages might use different levels of subdivision.
-   */
-  getMeshFromTileID(context: Context, tileID: CanonicalTileID, hasBorder: boolean, allowPoles: boolean, usage: TileMeshUsage): Mesh;
-  /**
-   * @internal
-   * Recalculates the projection state based on the current evaluation parameters.
-   * @param params - Evaluation parameters.
-   */
-  recalculate(params: EvaluationParameters): void;
-  /**
-   * @internal
-   * Returns true if the projection is currently transitioning between two states.
-   */
-  hasTransition(): boolean;
 }
 //#endregion
 //#region src/style/style.d.ts
@@ -12915,6 +12965,7 @@ declare class Map$1 extends Evented<MapEventType> {
   _mapId: number;
   _localIdeographFontFamily: string | false;
   _validateStyle: boolean;
+  _styleUrl: string | null;
   _requestManager: RequestManager;
   _locale: Record<string, string>;
   _removed: boolean;
@@ -14332,6 +14383,17 @@ declare class Map$1 extends Evented<MapEventType> {
    */
   getStyle(): StyleSpecification;
   /**
+   * Returns the URL the map's style was loaded from.
+   *
+   * @returns The URL given to {@link Map.setStyle} or the `style` map option, or `null` when the style was given as an object or the map has no style.
+   *
+   * @example
+   * ```ts
+   * const styleUrl = map.getStyleUrl();
+   * ```
+   */
+  getStyleUrl(): string | null;
+  /**
    * @internal
    * Returns the map's style and cloned images to restore context.
    * @returns An object containing the style and images.
@@ -14627,7 +14689,7 @@ declare class Map$1 extends Evented<MapEventType> {
    * domains must support [CORS](https://developer.mozilla.org/en-US/docs/Web/HTTP/Access_control_CORS).
    *
    * @param url - The URL of the image file. Image file must be in png, webp, or jpg format.
-   * @returns a promise that is resolved when the image is loaded
+   * @returns a promise that is resolved when the image is loaded, or rejected when the response has no image data (for example an HTTP 204)
    *
    * @example
    * Load an image from an external URL.
