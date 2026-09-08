@@ -478,7 +478,7 @@ declare class OverscaledTileID {
  * line bucket. Features without an annotation (vector tiles, constant paint
  * arrays, cluster paths) keep the previous piece-local behavior.
  */
-interface TaperProfile {
+type TaperProfile = {
   /** The original property array (one width/factor per original vertex, or any length). */
   values: number[];
   /**
@@ -487,8 +487,8 @@ interface TaperProfile {
    * `values` (mismatched arrays are spread evenly over the ring).
    */
   knotsPerRing: number[][];
-}
-interface GeoJSONTaperAnnotation {
+};
+type GeoJSONTaperAnnotation = {
   /**
    * For every ring of the clipped piece: the normalized arc position (0..1
    * along the ORIGINAL ring) of every piece vertex. Index-aligned with the
@@ -498,7 +498,7 @@ interface GeoJSONTaperAnnotation {
   profiles: {
     [propertyName: string]: TaperProfile;
   };
-}
+};
 //#endregion
 //#region src/util/struct_array.d.ts
 /**

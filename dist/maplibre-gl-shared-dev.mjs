@@ -22073,7 +22073,6 @@ function collectTaperFeatureInfo(feature, registry) {
 		const value = properties[name];
 		if (Array.isArray(value) && value.length > 0 && value.every((v) => Number.isFinite(Number(v)))) arrayProperties[name] = value.map(Number);
 	}
-	if (Object.keys(arrayProperties).length === 0) return;
 	const rings = [];
 	for (const line of lines) {
 		if (!line || line.length < 2) return;
@@ -22256,7 +22255,7 @@ function projectPieceLineOntoRing(line, ring, canonical) {
 		const chord = Math.hypot(wx - prevX, wy - prevY);
 		const expected = prevArc + chord;
 		let hit = projectOntoRingWindowed(wx, wy, ring, searchFrom, expected, quant * 8);
-		if (!hit) hit = projectOntoRing(wx, wy, ring, searchFrom);
+		hit ||= projectOntoRing(wx, wy, ring, searchFrom);
 		searchFrom = hit.segment;
 		prevArc = hit.arc;
 		prevX = wx;
@@ -22388,24 +22387,46 @@ function projectOntoRing(x, y, ring, searchFrom) {
 * Returns `null` when the alignment cannot be recovered (the caller then falls
 * back to the piece-local knots).
 */
+/**
+* Maps per-vertex taper knots from the tile piece (index-aligned with
+* `rawVertices`) onto the possibly subdivided vertex list the bucket emits.
+*
+* Subdivision (`subdivideVertexLine`) inserts extra vertices ON the existing
+* segments, but rounds inserted vertices, deduplicates them and skips
+* zero-length segments — original vertices may therefore appear slightly
+* displaced, collapsed or missing. Instead of index-matching, every emitted
+* vertex is projected onto the raw polyline (a monotone forward walk over the
+* raw segments), and its knot is linearly interpolated between the knots of
+* the bracketing raw vertices. That matches exactly what the shader does
+* between two emitted vertices, so subdivision never changes the rendered
+* width.
+*/
 function expandTaperKnots(rawVertices, vertices, knots) {
 	if (vertices.length === rawVertices.length) return knots.slice();
+	const rawCount = rawVertices.length;
 	const expanded = new Array(vertices.length);
-	let rawIndex = 0;
+	let seg = 0;
 	for (let i = 0; i < vertices.length; i++) {
 		const v = vertices[i];
-		if (rawIndex < rawVertices.length && v.equals(rawVertices[rawIndex])) {
-			expanded[i] = knots[rawIndex];
-			rawIndex++;
-		} else if (rawIndex > 0 && rawIndex < rawVertices.length) {
-			const a = rawVertices[rawIndex - 1];
-			const b = rawVertices[rawIndex];
-			const total = a.dist(b);
-			const f = total > 0 ? a.dist(v) / total : 0;
-			expanded[i] = knots[rawIndex - 1] + (knots[rawIndex] - knots[rawIndex - 1]) * Math.min(Math.max(f, 0), 1);
-		} else return null;
+		let bestSeg = seg, bestT = 0, bestResidual = Infinity;
+		for (let j = seg; j < rawCount - 1; j++) {
+			const ax = rawVertices[j].x, ay = rawVertices[j].y;
+			const bx = rawVertices[j + 1].x, by = rawVertices[j + 1].y;
+			const dx = bx - ax, dy = by - ay;
+			const l2 = dx * dx + dy * dy;
+			const t = l2 > 0 ? Math.max(0, Math.min(1, ((v.x - ax) * dx + (v.y - ay) * dy) / l2)) : 0;
+			const px = ax + dx * t, py = ay + dy * t;
+			const residual = (v.x - px) * (v.x - px) + (v.y - py) * (v.y - py);
+			if (residual < bestResidual) {
+				bestResidual = residual;
+				bestSeg = j;
+				bestT = t;
+			}
+		}
+		seg = bestSeg;
+		expanded[i] = knots[bestSeg] + (knots[bestSeg + 1] - knots[bestSeg]) * bestT;
 	}
-	return rawIndex === rawVertices.length ? expanded : null;
+	return expanded;
 }
 //#endregion
 //#region src/data/bucket/line_bucket.ts
@@ -22625,20 +22646,20 @@ var LineBucket = class {
 					this.lineKnots[k] = length > 0 ? cum / length : 0;
 				}
 			} else this.lineKnots = null;
-			const pieceKnots = this.taperAnnotation ? this.taperAnnotation.pieceKnots[ringIndex] : null;
-			const expandedKnots = pieceKnots && pieceKnots.length === rawVertices.length ? expandTaperKnots(rawVertices, vertices, pieceKnots) : null;
+			const pieceKnots = this.taperAnnotation?.pieceKnots[ringIndex] ?? null;
+			const expandedKnots = pieceKnots?.length === rawVertices.length ? expandTaperKnots(rawVertices, vertices, pieceKnots) : null;
 			this.taperVertexKnots = expandedKnots;
 			if (expandedKnots) {
 				if (this.widthsMode && this.taperWidthsValues) {
 					const knots = this.taperWidthsValues.knotsPerRing[ringIndex];
-					if (knots && knots.length === this.taperWidthsValues.values.length) this.taperWidthProfile = {
+					if (knots?.length === this.taperWidthsValues.values.length) this.taperWidthProfile = {
 						values: this.taperWidthsValues.values,
 						knots
 					};
 				}
 				if (this.factorsMode && this.taperFactorsValues) {
 					const knots = this.taperFactorsValues.knotsPerRing[ringIndex];
-					if (knots && knots.length === this.taperFactorsValues.values.length) this.taperFactorProfile = {
+					if (knots?.length === this.taperFactorsValues.values.length) this.taperFactorProfile = {
 						values: this.taperFactorsValues.values,
 						knots
 					};
